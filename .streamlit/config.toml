@@ -1,0 +1,11 @@
+[browser]
+# Don't show the first-run email prompt so the server starts immediately
+gatherUsageStats = false
+
+[server]
+# Bind to all interfaces so the app is reachable (e.g. from port forwarding)
+address = "0.0.0.0"
+# port is set by launcher (app.py) to use first available in 8501–8599
+headless = true
+enableCORS = false
+enableXsrfProtection = false
