@@ -3,3 +3,4 @@ yfinance
 numpy
 requests
 streamlit
+matplotlib
