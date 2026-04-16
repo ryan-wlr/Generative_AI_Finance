@@ -61,6 +61,18 @@ Then open the local Streamlit URL shown in the terminal, usually:
 http://localhost:8501
 ```
 
+## How to select your CSV file
+
+The app loads portfolio data from the upload control at the top of the page.
+
+1. Start the app with `streamlit run app.py`.
+2. In the browser, find **Upload your CSV file** at the top of the page.
+3. Click **Browse files**.
+4. Select the included sample portfolio file `assets 2025-07-31.csv` from the project folder.
+5. After the file loads, click **Load current prices 🔎** to refresh market data.
+
+If you want to use your own portfolio file instead, choose any CSV that contains the required columns listed above.
+
 ## Other helper apps
 
 - `app_minimal.py`: minimal upload screen for quick Streamlit validation
