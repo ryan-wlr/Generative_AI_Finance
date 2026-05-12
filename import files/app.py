@@ -186,6 +186,9 @@ if st.session_state.data_loaded:
             columns = ["Asset", "Ticker"] + gain_cols
             report = pd.concat([df[columns], pd.DataFrame([totals])], ignore_index=True)
 
+
+            
+
             def _color_gains(val):
                 if pd.isna(val):
                     return ""
@@ -218,7 +221,7 @@ if st.session_state.data_loaded:
             if update == "Yes":
                 st.markdown("## 📝 Stock Asset Details")
                 selected_asset = st.selectbox("🎯 Select an asset", st.session_state.df["Asset"].unique().tolist())
-
+                
                 # Ask for the units and price
                 changed_units = st.number_input(
                     "🔢 Units bought (+) or sold (−), e.g. 2 or −2:",
@@ -233,8 +236,8 @@ if st.session_state.data_loaded:
                     value=0.0,
                     step=0.01,
                     format="%.2f",
-                )
-
+                )    
+                
                 if st.button("💾 Update asset"):
                     if selected_asset and changed_units != 0 and new_purchase_price > 0:
                         # Update units and average purchase price
