@@ -3,6 +3,8 @@ Simple interactive CLI for stock portfolio analysis.
 Run: python cli_app.py
 """
 import os
+import sys
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -529,6 +531,59 @@ def _investment_possibilities(state):
     _prompt("Press Enter to return to main menu")
 
 
+def _alpaca_trading_menu(df):
+    print("\nAlpaca trading bot")
+    print("This will prompt for paper/live mode and run only during market hours.")
+    print("The bot stays active in this tab; it sleeps when market is closed and wakes when open.")
+    confirm = _prompt("Start Alpaca bot now? (y/n)", "n").strip().lower()
+    if confirm != "y":
+        return
+
+    while True:
+        try:
+            from alpaca_trading_bot import run_bot
+        except Exception as exc:
+            err_txt = str(exc)
+            print(f"Could not load alpaca bot: {err_txt}")
+            if "No module named 'alpaca'" in err_txt or 'No module named "alpaca"' in err_txt:
+                print("alpaca-py is missing in this Python environment. Installing now...")
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "alpaca-py"])
+                    print("alpaca-py installed. Retrying bot load...")
+                    continue
+                except Exception as install_exc:
+                    print(f"Auto-install failed: {install_exc}")
+                    print("Run manually: python -m pip install alpaca-py")
+            else:
+                print("Install dependencies first: python -m pip install -r requirements.txt")
+
+            cmd = _prompt("Type BACK to return to main menu, or press Enter to retry", "").strip().upper()
+            if cmd == "BACK":
+                return
+            continue
+
+        print("Starting Alpaca bot... use Ctrl+C then type EXIT if you truly want to leave bot mode.")
+        try:
+            tickers = [
+                t
+                for t in df["Ticker"].astype(str).str.strip().unique().tolist()
+                if t and str(t).lower() != "nan"
+            ]
+            run_bot(portfolio_tickers=tickers)
+        except KeyboardInterrupt:
+            # run_bot already handles Ctrl+C, but keep this as a safe fallback.
+            pass
+        except Exception as exc:
+            print(f"Alpaca bot error: {exc}")
+
+        cmd = _prompt(
+            "Bot session ended. Type BACK to return to main menu, or press Enter to restart bot",
+            "",
+        ).strip().upper()
+        if cmd == "BACK":
+            return
+
+
 def main():
     print("Stock Analysis CLI")
     df = None
@@ -548,7 +603,8 @@ def main():
         print("  5. Analysis")
         print("  6. AI Recommendations")
         print("  7. Investment Possibilities")
-        print("  8. Exit")
+        print("  8. Alpaca Trading Bot")
+        print("  9. Exit")
         choice = _prompt("Select option")
 
         if choice == "1":
@@ -568,6 +624,8 @@ def main():
         elif choice == "7":
             _investment_possibilities(state)
         elif choice == "8":
+            _alpaca_trading_menu(df)
+        elif choice == "9":
             print("Goodbye.")
             break
         else:

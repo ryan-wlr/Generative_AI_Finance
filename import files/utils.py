@@ -1,4 +1,5 @@
 
+import os
 import time
 import pandas as pd
 import yfinance as yf
@@ -912,3 +913,187 @@ def format_new_instrument_assessment(
         f"*   **Momentum Signal:** {momentum}\n\n"
         f"*   **Recommendation:** {rec}"
     )
+
+
+PORTFOLIO_AI_SYSTEM_PROMPT = """You are an expert portfolio analyst and personal finance educator.
+
+For every ticker in the current portfolio:
+1) Summarize key strengths and risks using the KPIs provided.
+2) Flag momentum signals (moving averages, MACD, RSI, Sharpe, volatility).
+3) Give a final recommendation (Buy, Sell, Hold) with a 1–2 sentence rationale.
+
+If candidate instruments are provided, assess each relative to the existing portfolio.
+
+You MUST end your response with a section titled exactly:
+## Overall Portfolio Note
+
+That section must be 3–5 sentences covering diversification, aggregate risk (volatility/beta),
+valuation/momentum themes, and one concrete portfolio-level action.
+
+Format the full answer in markdown and start with a single H1 title."""
+
+
+def build_portfolio_kpi_dataframe(
+    tickers: list,
+    *,
+    assets: list | None = None,
+    prices_today: list | None = None,
+    session=None,
+) -> pd.DataFrame:
+    """Build a KPI table for LLM context (no console output)."""
+    sess = session or _yahoo_session()
+    rows = []
+    for i, raw in enumerate(tickers):
+        sym = str(raw).strip().upper()
+        if not sym or sym.lower() == "nan":
+            continue
+        ph, info = get_history(sym, session=sess)
+        if ph is None or ph.empty or "Close" not in ph.columns:
+            continue
+        info = info if isinstance(info, dict) else {}
+        close = ph["Close"].astype(float)
+        n = len(close)
+        ma50 = float(close.rolling(50).mean().iloc[-1]) if n >= 50 else np.nan
+        ma100 = float(close.rolling(100).mean().iloc[-1]) if n >= 100 else np.nan
+        ma200 = float(close.rolling(200).mean().iloc[-1]) if n >= 200 else np.nan
+        vol = compute_volatility_from_price_history(ph)
+        pe = compute_pe_ratio(sym)
+        beta = beta_values(sym)
+        sharpe = _annualized_sharpe_from_close(close)
+        rsi_ser = _rsi_series_from_close(close, 14)
+        rsi_last = (
+            float(rsi_ser.iloc[-1])
+            if rsi_ser is not None and not rsi_ser.empty and pd.notna(rsi_ser.iloc[-1])
+            else np.nan
+        )
+        macd_df = _macd_frame_from_close(close)
+        macd_val = signal_val = np.nan
+        if macd_df is not None and not macd_df.empty:
+            last = macd_df.iloc[-1]
+            macd_val = float(last["MACD"])
+            signal_val = float(last["Signal"])
+        if assets and i < len(assets) and assets[i]:
+            asset = str(assets[i])
+        else:
+            asset = (
+                info.get("longName")
+                or info.get("shortName")
+                or info.get("symbol")
+                or sym
+            )
+        if prices_today and i < len(prices_today) and pd.notna(prices_today[i]):
+            price = float(prices_today[i])
+        else:
+            price = float(close.iloc[-1])
+        rows.append(
+            {
+                "Ticker": sym,
+                "Asset": asset,
+                "Price Today": price,
+                "MA50": ma50,
+                "MA100": ma100,
+                "MA200": ma200,
+                "Volatility": vol,
+                "PE Ratio": pe,
+                "Beta": beta,
+                "Sharpe Ratio": sharpe,
+                "RSI": rsi_last,
+                "MACD": macd_val,
+                "Signal": signal_val,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def format_overall_portfolio_note_heuristic(kpi_df: pd.DataFrame) -> str:
+    """Rule-based overall portfolio note when the LLM is unavailable."""
+    if kpi_df is None or kpi_df.empty:
+        return (
+            "## Overall Portfolio Note\n\n"
+            "Not enough KPI data to summarize the portfolio. Load prices and verify tickers, then try again."
+        )
+    n = len(kpi_df)
+    vols = pd.to_numeric(kpi_df.get("Volatility"), errors="coerce").dropna()
+    betas = pd.to_numeric(kpi_df.get("Beta"), errors="coerce").dropna()
+    sharpes = pd.to_numeric(kpi_df.get("Sharpe Ratio"), errors="coerce").dropna()
+    rsis = pd.to_numeric(kpi_df.get("RSI"), errors="coerce").dropna()
+    macd = pd.to_numeric(kpi_df.get("MACD"), errors="coerce")
+    signal = pd.to_numeric(kpi_df.get("Signal"), errors="coerce")
+    bullish = int(((macd > signal) & macd.notna() & signal.notna()).sum()) if len(kpi_df) else 0
+
+    vol_txt = (
+        f"Average annualized volatility is about {vols.mean():.0f}% across names with data."
+        if not vols.empty
+        else "Volatility data is limited for several holdings."
+    )
+    beta_txt = (
+        f"Average beta is about {betas.mean():.2f}, suggesting "
+        + ("above-market" if betas.mean() > 1.05 else "near-market" if betas.mean() > 0.9 else "below-market")
+        + " sensitivity vs. the Yahoo benchmark."
+        if not betas.empty
+        else "Beta is missing for some listings (common for ETFs/alternatives)."
+    )
+    sharpe_txt = (
+        f"{int((sharpes >= 0).sum())} of {len(sharpes)} names show non-negative Sharpe on this window."
+        if not sharpes.empty
+        else ""
+    )
+    rsi_txt = ""
+    if not rsis.empty:
+        hot = int((rsis >= 70).sum())
+        cold = int((rsis <= 30).sum())
+        if hot:
+            rsi_txt = f" {hot} holding(s) look overbought on RSI."
+        elif cold:
+            rsi_txt = f" {cold} holding(s) look oversold on RSI."
+
+    action = (
+        "Consider trimming the highest-volatility names or adding a lower-beta diversifier if risk feels high."
+        if not vols.empty and vols.mean() >= 35
+        else "Momentum is mixed; rebalance toward names with stronger risk-adjusted trends and clear MACD support."
+    )
+
+    body = (
+        f"Across **{n}** holdings, {vol_txt} {beta_txt}"
+        + (f" {sharpe_txt}" if sharpe_txt else "")
+        + (f" MACD is bullish on **{bullish}** of **{n}** names." if n else "")
+        + rsi_txt
+        + f" {action}"
+    )
+    return f"## Overall Portfolio Note\n\n{body.strip()}"
+
+
+def generate_portfolio_ai_markdown(
+    current_portfolio: pd.DataFrame,
+    candidate_instruments: pd.DataFrame | None = None,
+    *,
+    model: str | None = None,
+) -> str:
+    """Call OpenAI with portfolio KPI tables; response includes ## Overall Portfolio Note."""
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not set. Add it to your .env file.")
+
+    candidates = (
+        candidate_instruments
+        if candidate_instruments is not None and not candidate_instruments.empty
+        else pd.DataFrame()
+    )
+    human = (
+        f"Current portfolio:\n{current_portfolio.to_string(index=False)}\n\n"
+        f"Instruments under consideration:\n"
+        f"{candidates.to_string(index=False) if not candidates.empty else '(none)'}\n\n"
+        "Assess each holding and each candidate. You MUST include the section "
+        "## Overall Portfolio Note at the end."
+    )
+    llm = ChatOpenAI(
+        model=model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        temperature=0,
+    )
+    response = llm.invoke(
+        [("system", PORTFOLIO_AI_SYSTEM_PROMPT), ("human", human)]
+    )
+    content = (response.content or "").strip()
+    if "## Overall Portfolio Note" not in content:
+        content = content + "\n\n" + format_overall_portfolio_note_heuristic(current_portfolio)
+    return content

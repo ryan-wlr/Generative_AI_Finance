@@ -1,7 +1,9 @@
 pandas
 yfinance
 numpy
+matplotlib
 requests
 streamlit
 langchain_openai
 python-dotenv
+alpaca-py

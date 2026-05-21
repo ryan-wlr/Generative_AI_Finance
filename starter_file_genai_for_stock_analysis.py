@@ -118,17 +118,74 @@ from datetime import date
 
 # Find the date of today
 today = date.today().strftime("%Y-%m-%d")
+  get_history,
+  _yahoo_session,
+  get_prices_batch,
+  get_prices_via_chart_api,
+  format_new_instrument_assessment,
 today
 
-# Update the columns
+_IDEA_TICKER_ALIASES = {"ORACLE": "ORCL"}
 df["Price Last Update"] = df["Price Today (EUR)"]
-df["Date Last Update"] = today
+"""### Investment Possibilities"""
 df["Value Last Update"] = df["Price Today (EUR)"] * df["Units"]
-df.head()
+new_tickers_input = input("Enter New Ticker symbols (comma-separated), e.g. NVDA, TSLA: ")
+raw_symbols = [s.strip().upper() for s in new_tickers_input.replace(";", ",").split(",")]
+seen = set()
+idea_syms = []
+for sym in raw_symbols:
+  if not sym:
+    continue
+  sym = _IDEA_TICKER_ALIASES.get(sym, sym)
+  if sym not in seen:
+    seen.add(sym)
+    idea_syms.append(sym)
 
+if idea_syms:
+  sess = _yahoo_session()
+  print("\n## Portfolio & New Instruments Analysis")
+  for idx, sym in enumerate(idea_syms, start=1):
+    ph, info = get_history(sym, session=sess)
+    if ph is None or ph.empty or "Close" not in ph.columns:
+      print(f"{sym}: Could not load enough history for a live write-up.")
+      continue
+    print(format_new_instrument_assessment(sym, ph, info, item_index=idx))
+    if idx < len(idea_syms):
+      print("\n---\n")
 
+  idea_prices = get_prices_batch(idea_syms, session=sess)
+  if not idea_prices:
+    idea_prices = get_prices_via_chart_api(idea_syms, session=sess)
 
-# isolating the first 10 columns
-df.iloc[:, :10].to_csv(f'assets {today}.csv', index=False)
-df
+  print("\n#### Saved ticker ideas")
+  print(", ".join(idea_syms))
+
+  print("\n#### Latest prices")
+  if idea_prices:
+    for sym in idea_syms:
+      if sym in idea_prices:
+        print(f"- {sym}: {idea_prices[sym]:.2f} (native currency)")
+      else:
+        print(f"- {sym}: price unavailable")
+  else:
+    print("Could not load prices right now.")
+
+  print("\n#### Portfolio analysis")
+  candidate_kpis = build_portfolio_kpi_dataframe(idea_syms, session=sess)
+  display(df_current_portfolio)
+  display(candidate_kpis)
+
+  print("\n#### Overall portfolio note")
+  try:
+    ai_markdown = generate_portfolio_ai_markdown(df_current_portfolio, candidate_kpis)
+  except ValueError as exc:
+    print(exc)
+    ai_markdown = (
+      "# Portfolio Analysis (offline)\n\n"
+      + format_overall_portfolio_note_heuristic(df_current_portfolio)
+    )
+  print(ai_markdown)
+  display(Markdown(ai_markdown))
+else:
+  print("No ticker ideas provided. Skipping investment possibilities.")
 

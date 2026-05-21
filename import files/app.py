@@ -12,8 +12,6 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-
 load_dotenv(Path(__file__).resolve().parent / ".env")
 from utils import (
     get_fx_rate,
@@ -36,6 +34,9 @@ from utils import (
     compute_rsi,
     compute_macd,
     format_new_instrument_assessment,
+    build_portfolio_kpi_dataframe,
+    generate_portfolio_ai_markdown,
+    format_overall_portfolio_note_heuristic,
 )
 
 # Common Yahoo symbol aliases for the Investment Possibilities tab
@@ -825,8 +826,10 @@ if st.session_state.data_loaded:
                 unsafe_allow_html=True,
             )
 
-            if st.session_state.idea_tickers:
-                sess = _yahoo_session()
+            sess = _yahoo_session()
+            idea_syms = list(st.session_state.idea_tickers)
+
+            if idea_syms:
                 as_of = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 st.caption(
                     f"Live assessment from current Yahoo price history and fundamentals (as of **{as_of}**). "
@@ -834,7 +837,6 @@ if st.session_state.data_loaded:
                 )
 
                 with st.spinner("⏳ Fetching live data and writing analysis…"):
-                    idea_syms = list(st.session_state.idea_tickers)
                     for idx, sym in enumerate(idea_syms, start=1):
                         ph, info = get_history(sym, session=sess)
                         if ph is None or ph.empty or "Close" not in ph.columns:
@@ -868,3 +870,59 @@ if st.session_state.data_loaded:
                     "After you add tickers with **+ Submit**, a live write-up is generated here from the latest data."
                 )
                 st.info("No ticker ideas saved yet. Enter symbols above and click + Submit.")
+
+            st.markdown("---")
+            st.markdown("#### Portfolio analysis")
+            st.caption(
+                "Side-by-side KPI snapshots for current holdings and candidate tickers (educational only)."
+            )
+            holdings = st.session_state.df
+            hold_tickers = [
+                t
+                for t in holdings["Ticker"].astype(str).str.strip().unique().tolist()
+                if t and str(t).lower() != "nan"
+            ]
+            hold_assets = holdings.set_index("Ticker")["Asset"].astype(str).to_dict()
+            hold_prices = None
+            if "Price Today (EUR)" in holdings.columns:
+                hold_prices = [
+                    holdings.loc[holdings["Ticker"].astype(str).str.strip() == t, "Price Today (EUR)"].iloc[0]
+                    for t in hold_tickers
+                ]
+            with st.spinner("⏳ Building portfolio analysis…"):
+                kpi_holdings = build_portfolio_kpi_dataframe(
+                    hold_tickers,
+                    assets=[hold_assets.get(t, t) for t in hold_tickers],
+                    prices_today=hold_prices,
+                    session=sess,
+                )
+                kpi_candidates = build_portfolio_kpi_dataframe(idea_syms, session=sess)
+
+            if not kpi_holdings.empty:
+                st.markdown("##### Current holdings")
+                st.dataframe(kpi_holdings, use_container_width=True)
+            else:
+                st.info("No holdings data available for portfolio analysis.")
+
+            if not kpi_candidates.empty:
+                st.markdown("##### Candidate tickers")
+                st.dataframe(kpi_candidates, use_container_width=True)
+            else:
+                st.info("No candidate tickers data available for portfolio analysis.")
+
+            st.markdown("---")
+            st.markdown("#### Overall portfolio note")
+            st.caption(
+                "Synthesizes your **uploaded holdings** plus any **saved ticker ideas** "
+                "(educational only — not investment advice)."
+            )
+            with st.spinner("⏳ Building portfolio summary…"):
+                try:
+                    portfolio_note = generate_portfolio_ai_markdown(kpi_holdings, kpi_candidates)
+                except ValueError:
+                    portfolio_note = format_overall_portfolio_note_heuristic(
+                        pd.concat([kpi_holdings, kpi_candidates], ignore_index=True)
+                        if not kpi_candidates.empty
+                        else kpi_holdings
+                    )
+            st.markdown(portfolio_note)

@@ -7,10 +7,47 @@ Original file is located at
     https://colab.research.google.com/drive/1Bu04qtqp0l0o9xhv6haZz2pjvGwrt-r6
 """
 
+from pathlib import Path
+
 import pandas as pd
 
-# Load the CSV file using its full path
-df = pd.read_csv('/content/sample_data/assets 2025-07-31.csv')
+try:
+    from IPython.display import display, Markdown
+except ImportError:
+    def display(obj):
+        if isinstance(obj, pd.DataFrame):
+            print(obj.to_string())
+        else:
+            print(obj)
+
+    class Markdown:
+        def __init__(self, text):
+            self.text = text
+
+        def _repr_markdown_(self):
+            return self.text
+
+        def __str__(self):
+            return self.text
+
+
+def _assets_csv_path() -> Path:
+    base = Path(__file__).resolve().parent
+    for name in ("assets 2025-07-31.csv", "assets.csv"):
+        candidate = base / name
+        if candidate.exists():
+            return candidate
+    colab = Path("/content/sample_data/assets 2025-07-31.csv")
+    if colab.exists():
+        return colab
+    raise FileNotFoundError(
+        "Portfolio CSV not found. Place 'assets 2025-07-31.csv' or 'assets.csv' "
+        "in the same folder as this script."
+    )
+
+
+# Load the CSV file
+df = pd.read_csv(_assets_csv_path())
 
 # Display the first few rows to confirm it loaded correctly
 display(df.head())
@@ -32,8 +69,8 @@ import matplotlib.pyplot as plt
 
 import pandas as pd
 
-# Load the CSV file from the sample_data directory
-data_df = pd.read_csv('/content/sample_data/assets 2025-07-31.csv')
+# Load the CSV file from the project or Colab sample_data directory
+data_df = pd.read_csv(_assets_csv_path())
 
 # Display the first few rows to confirm it loaded correctly
 display(data_df.head())
@@ -112,20 +149,23 @@ df["Gain since Purchase (%)"] = df["Gain since Purchase (EUR)"] / (df["Units"] *
 df.head()
 
 # Compute the totals
+total_cost = (df["Units"] * df["Purchase Price"]).sum()
+total_gain_last = df["Gain since Last Update (EUR)"].sum()
+total_gain_purchase = df["Gain since Purchase (EUR)"].sum()
+total_gain_pct = (total_gain_purchase / total_cost * 100) if total_cost else 0.0
 totals = {
     "Asset": "Total",
     "Ticker": "",
-    "Gain EUR Since Last Update": df["Gain since Last Update (EUR)"].sum(),
-    "Gain % Since Last Update": df["Gain since Last Update (%)"].sum() / df["Value Last Update"].sum(),
-    "Gain EUR Since Purchase": df["Gain since Purchase (EUR)"].sum(),
-    "Gain % Since Purchase": df["Gain since Purchase (%)"].sum() / ((df["Units"] * df["Purchase Price"]).sum())
+    "Gain since Last Update (EUR)": float(total_gain_last),
+    "Gain since Purchase (EUR)": float(total_gain_purchase),
+    "Gain since Purchase (%)": float(total_gain_pct),
 }
-totals_df = pd.DataFrame(totals, index=[0])
+totals_df = pd.DataFrame([totals])
 totals_df
 
 # Fetch the columns to show
 columns = ["Asset", "Ticker", "Gain since Last Update (EUR)", "Gain since Purchase (EUR)", "Gain since Purchase (%)"]
-report = pd.concat([df[columns], pd.DataFrame([totals])], ignore_index=True)
+report = pd.concat([df[columns], totals_df], ignore_index=True)
 # Display report with just 2 floating cases
 pd.options.display.float_format = '{:.2f}'.format
 report
@@ -225,7 +265,6 @@ while True:
       }
 
       # Append to the dataframe
-      global df # Ensure df is modified globally
       df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
       print(f"Asset '{asset_name}' added successfully.")
 
@@ -273,7 +312,7 @@ def get_history(ticker, period = "1y", interval = "1d"):
     return price_history, info
   except Exception:
     print(f"Error fetching {ticker}")
-    return pd.DataFrame
+    return pd.DataFrame(), {}
 
 price_history, info = get_history("AMZN")
 
@@ -494,6 +533,8 @@ def sharpe_ratio(ticker, risk_free_rate = 0.04):
   annualized_volatility = returns.std() * np.sqrt(252)
 
   # Compute the Sharpe Ratio
+  if volatility == 0 or pd.isna(volatility):
+    return np.nan
   sharpe = (annualized_return - risk_free_rate) / volatility
 
   # Display and interpret the output
@@ -627,93 +668,50 @@ for ticker in df["Ticker"]:
   macd = compute_macd(ticker)
   plot_macd(macd, ticker)
 
-# Build a function to visualize the MACD and Signal
-def plot_macd(price_history, ticker):
-  """
-  Plot the MACD and Signal for a ticker
-  """
-  plt.figure(figsize=(12, 4))
-  plt.plot(price_history.index, price_history["MACD"], label="MACD", color="blue")
-  plt.plot(price_history.index, price_history["Signal"], label="Signal", color = "red")
-  plt.axhline(y=0, color="black", linestyle="--")
-  plt.title(f"MACD and Signal for {ticker}")
-  plt.xlabel("Date")
-  plt.ylabel("MACD/Signal")
-  plt.legend()
-  plt.grid(True)
-  plt.show()
-
 """# AI Recommendations"""
 
-!pip install langchain_openai -q
+# Requires: pip install langchain_openai python-dotenv (see requirements.txt)
 
-from google.colab import userdata
-OPENAI_API_KEY = userdata.get('OPENAI_API_KEY')
-
-# Set the key in the os
 import os
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+from dotenv import load_dotenv
 
-from langchain_openai import ChatOpenAI
-from IPython.display import Markdown
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
-# Connect to the API
-llm = ChatOpenAI(
-    model = "gpt-4.1",
-    temperature=0)
+from utils import (
+    build_portfolio_kpi_dataframe,
+    generate_portfolio_ai_markdown,
+    format_overall_portfolio_note_heuristic,
+)
 
-# Define the instrucitons
-instructions = """
-You are an expert portfolio analysis and personal finances.
+# Aggregate KPIs for the current portfolio (quiet — no per-ticker print spam)
+_prices = df["Price Today (EUR)"].tolist() if "Price Today (EUR)" in df.columns else None
+df_current_portfolio = build_portfolio_kpi_dataframe(
+    df["Ticker"].tolist(),
+    assets=df["Asset"].tolist(),
+    prices_today=_prices,
+)
+display(df_current_portfolio)
 
-For every ticker:
-1) Summarize the key strenths and risks based on the KPIs provides.
-2) Flag Momentum Signals based on the KPIs
-3) Make a final recommendations (Buy, Sell, Hold) with a 1-2 sentence rationale
+"""### Possible New Investments"""
 
-Finish with a brief overal protfolio note.
-Format the answer in markdown and start with a n H1
-"""
+new_tickers_input = input("Please enter new tickers separated by commas (or press Enter to skip): ")
+new_ticker_list = [t.strip().upper() for t in new_tickers_input.split(",") if t.strip()]
 
-compute_macd("AMZN")["MACD"].iloc[-1]
+if new_ticker_list:
+    data = build_portfolio_kpi_dataframe(new_ticker_list)
+else:
+    data = pd.DataFrame()
+display(data)
 
-# Aggregate all the data
-agg = {
-    "Ticker": df["Ticker"].tolist(),
-    "Asset": df["Asset"].tolist(),
-    "Price Today": df["Price Today (EUR)"].tolist(),
-    # Moving averages
-    "MA50": [get_history(t)[0]['Close'].rolling(50).mean().iloc[-1] for t in df["Ticker"]],
-    "MA100": [get_history(t)[0]['Close'].rolling(100).mean().iloc[-1] for t in df["Ticker"]],
-    "MA200": [get_history(t)[0]['Close'].rolling(200).mean().iloc[-1] for t in df["Ticker"]],
-    # Price
+# Generate AI markdown (includes mandatory ## Overall Portfolio Note)
+try:
+    ai_markdown = generate_portfolio_ai_markdown(df_current_portfolio, data)
+except ValueError as exc:
+    print(exc)
+    ai_markdown = (
+        "# Portfolio Analysis (offline)\n\n"
+        + format_overall_portfolio_note_heuristic(df_current_portfolio)
+    )
 
-    # Remaining KPIs
-    "Volatility": [compute_volatility(t) for t in df["Ticker"]],
-    "PE Ratio": [pe_ratio(t) for t in df["Ticker"]],
-    "Beta": [beta_values(t) for t in df["Ticker"]],
-    "Sharpe Ratio": [sharpe_ratio(t) for t in df["Ticker"]],
-    "RSI": [rsi(t) for t in df["Ticker"]],
-    "MACD": [compute_macd(t)['MACD'].iloc[-1] for t in df["Ticker"]],
-    "Signal": [compute_macd(t)['Signal'].iloc[-1] for t in df["Ticker"]]
-}
-
-# Transform to a Pandas Dataframe
-data = pd.DataFrame(agg)
-data
-
-data.to_string()
-
-get_history("AMZN")[0]['Close'].rolling(50).mean().iloc[-1]
-
-# Setup the messages
-messages = [
-    ("system", instructions),
-    ("human", data.to_string())
-]
-
-# Calling the LLM
-ai_recommendation = llm.invoke(messages)
-
-Markdown(ai_recommendation.content)
-
+print(ai_markdown)
+display(Markdown(ai_markdown))

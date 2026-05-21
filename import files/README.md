@@ -20,20 +20,11 @@ A Streamlit app for tracking portfolio performance from a CSV file, refreshing m
   - Sharpe ratio
   - RSI
   - MACD
-- AI recommendations tab:
-  - Volatility, P/E, beta, Sharpe, and MACD summaries
-  - Explanations for how to interpret each metric
-- Investment possibilities tab:
-  - Add candidate tickers
-  - Live write-ups using the same analytics engine
-  - Latest prices for saved tickers
-- CLI app for terminal usage
 
 ## Project Files
 
 - `app.py`: Main Streamlit app
 - `utils.py`: Data retrieval and analysis helpers
-- `cli_app.py`: Interactive CLI version for terminal use
 - `requirements.txt`: Python dependencies
 - `run.ps1`: Windows helper script to launch the app with the local venv Python
 - `app_minimal.py`: Minimal Streamlit smoke test
@@ -48,7 +39,7 @@ A Streamlit app for tracking portfolio performance from a CSV file, refreshing m
 ## Installation
 
 ```powershell
-cd "c:\Users\ryan_\Documents\github\Generative_AI_Finance"
+cd "c:\Users\ryan_\Documents\cursor\stock analysis"
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -69,13 +60,6 @@ streamlit run app.py
 .\run.ps1
 ```
 
-### Option 3: CLI (terminal)
-
-```powershell
-.\venv\Scripts\Activate.ps1
-python cli_app.py
-```
-
 ## CSV Input Format
 
 Your uploaded CSV must include these columns (exact names after trimming spaces):
@@ -91,7 +75,6 @@ Your uploaded CSV must include these columns (exact names after trimming spaces)
 
 ## Notes
 
-- Create a `.env` file at the repo root with `OPENAI_API_KEY=...` if you plan to use the AI features.
 - Prices are converted to EUR using FX rates from Yahoo pairs.
 - If a ticker cannot be priced, the app continues and marks that row as unavailable.
 - Some analysis metrics may be unavailable for certain instruments (for example ETFs/crypto for P/E).
