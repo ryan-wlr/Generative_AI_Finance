@@ -8,6 +8,22 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
+SUPPORTED_MIN = (3, 10)
+SUPPORTED_MAX_EXCLUSIVE = (3, 14)
+
+
+def _ensure_supported_python() -> None:
+    v = sys.version_info
+    if (v.major, v.minor) < SUPPORTED_MIN or (v.major, v.minor) >= SUPPORTED_MAX_EXCLUSIVE:
+        raise SystemExit(
+            "Unsupported Python version "
+            f"{v.major}.{v.minor}. "
+            "Use Python 3.10-3.13 (recommended: 3.11, e.g. .venv311)."
+        )
+
+
+_ensure_supported_python()
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
