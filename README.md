@@ -53,6 +53,7 @@ The project supports:
 - `requirements.txt`: Python dependencies
 - `run.ps1`: Windows helper script to launch the app with the local venv Python
 - `run_cli.ps1`: Windows helper script for CLI in the `.venv311` environment
+- `run_cli.sh`: Git Bash helper script for CLI in the `.venv311` environment
 - `run_cloud.sh`: Bash/cloud helper script for Streamlit deployment
 - `app_minimal.py`: Minimal Streamlit smoke test
 - `hello_world.py`: Basic Streamlit hello-world test
@@ -74,11 +75,12 @@ pip install -r requirements.txt
 
 ## Run
 
+Use the Python 3.11 environment (`.venv311`) for this project.
+
 ### Option 1: Streamlit directly
 
 ```powershell
-.\.venv311\Scripts\Activate.ps1
-streamlit run app.py
+.\.venv311\Scripts\python.exe -m streamlit run app.py
 ```
 
 ### Option 2: PowerShell launcher script
@@ -90,8 +92,7 @@ streamlit run app.py
 ### Option 3: CLI (terminal)
 
 ```powershell
-.\.venv311\Scripts\Activate.ps1
-python cli_app.py
+.\.venv311\Scripts\python.exe cli_app.py
 ```
 
 ### Option 4: CLI helper script (PowerShell)
@@ -105,6 +106,17 @@ powershell -ExecutionPolicy Bypass -File .\run_cli.ps1
 ```bash
 PORT=8501 bash ./run_cloud.sh
 ```
+
+### Option 6: CLI helper script (Git Bash)
+
+```bash
+bash ./run_cli.sh
+```
+
+Common mistakes to avoid:
+
+- Do not run `python cli_app.py` from `.venv` (Python 3.14).
+- Do not run `python run_cli.sh`; run `bash ./run_cli.sh`.
 
 ## Alpaca Trading Bot (CLI Option 8)
 
