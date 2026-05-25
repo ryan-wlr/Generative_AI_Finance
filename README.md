@@ -113,6 +113,23 @@ PORT=8501 bash ./run_cloud.sh
 bash ./run_cli.sh
 ```
 
+### Option 7: CLI on Google Cloud VM (Ubuntu)
+
+```bash
+cd ~/Generative_AI_Finance
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv python3-pip
+sed -i 's/\r$//' ./run_cli.sh
+chmod +x ./run_cli.sh
+bash ./run_cli.sh
+```
+
+If you get permission issues, run:
+
+```bash
+/bin/bash ./run_cli.sh
+```
+
 Common mistakes to avoid:
 
 - Do not run `python cli_app.py` from `.venv` (Python 3.14).
