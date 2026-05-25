@@ -8,6 +8,7 @@ The project supports:
 - Terminal workflow in `cli_app.py`
 - Investment Possibilities assessments with portfolio-wide notes
 - Alpaca paper/live bot mode from the CLI menu
+- Automated security scans and dependency update checks via GitHub Actions
 
 ## Features
 
@@ -157,3 +158,9 @@ ALPACA_LIVE_BASE_URL=https://api.alpaca.markets
 - If a ticker cannot be priced, the app continues and marks that row as unavailable.
 - Some analysis metrics may be unavailable for certain instruments (for example ETFs/crypto for P/E).
 - Keep `.env` out of Git commits.
+
+## Security
+
+- See `SECURITY.md` for Google Cloud hardening guidance.
+- GitHub Actions security scans run on push and pull request.
+- Dependabot proposes weekly dependency update PRs.

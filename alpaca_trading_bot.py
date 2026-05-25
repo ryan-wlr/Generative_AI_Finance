@@ -33,6 +33,23 @@ from dotenv import load_dotenv
 from utils import _yahoo_session, get_history, format_new_instrument_assessment
 
 
+def init_log_file(mode: str) -> Path:
+    """Create and return a log file path for this bot session."""
+    logs_dir = Path(__file__).resolve().parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return logs_dir / f"alpaca_bot_{mode}_{stamp}.log"
+
+
+def bot_log(message: str, log_file: Path | None = None) -> None:
+    """Print to console and append the same message to a log file."""
+    print(message)
+    if log_file is None:
+        return
+    with log_file.open("a", encoding="utf-8") as fh:
+        fh.write(message + "\n")
+
+
 def load_env_files() -> None:
     """Load .env from project root and fallback folder used in this repo."""
     root_env = Path(__file__).resolve().parent / ".env"
@@ -72,7 +89,7 @@ def get_credentials(mode: str) -> tuple[str, str, str]:
     return api_key, api_secret, base_url
 
 
-def ask_bot_settings() -> tuple[int, int]:
+def ask_bot_settings() -> tuple[int, int, int, float]:
     qty_text = input("Order quantity (default 1): ").strip() or "1"
     qty = int(qty_text)
     if qty <= 0:
@@ -83,7 +100,17 @@ def ask_bot_settings() -> tuple[int, int]:
     if interval_seconds < 5:
         interval_seconds = 5
 
-    return qty, interval_seconds
+    eod_text = input("Force-close positions this many minutes before market close (default 10): ").strip() or "10"
+    eod_close_minutes = int(eod_text)
+    if eod_close_minutes < 0:
+        eod_close_minutes = 0
+
+    loss_text = input(
+        "Close open positions when unrealized P/L drops below this amount (default 0 = any loss): "
+    ).strip() or "0"
+    loss_close_threshold = float(loss_text)
+
+    return qty, interval_seconds, eod_close_minutes, loss_close_threshold
 
 
 def get_position_qty(client: TradingClient, symbol: str) -> int:
@@ -96,6 +123,23 @@ def get_position_qty(client: TradingClient, symbol: str) -> int:
         return int(float(pos.qty))
     except Exception:
         return 0
+
+
+def get_unrealized_pl(client: TradingClient, symbol: str) -> float | None:
+    """Return unrealized P/L in account currency for an open position, else None."""
+    try:
+        pos = client.get_open_position(symbol)
+    except Exception:
+        return None
+
+    raw = getattr(pos, "unrealized_pl", None)
+    if raw is None:
+        return None
+
+    try:
+        return float(raw)
+    except Exception:
+        return None
 
 
 def _extract_recommendation(assessment_md: str) -> str:
@@ -144,7 +188,13 @@ def is_symbol_tradable(client: TradingClient, symbol: str) -> bool:
         return False
 
 
-def place_market_order(client: TradingClient, symbol: str, side: OrderSide, qty: int) -> None:
+def place_market_order(
+    client: TradingClient,
+    symbol: str,
+    side: OrderSide,
+    qty: int,
+    log_file: Path | None = None,
+) -> None:
     req = MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -152,14 +202,22 @@ def place_market_order(client: TradingClient, symbol: str, side: OrderSide, qty:
         time_in_force=TimeInForce.DAY,
     )
     order = client.submit_order(order_data=req)
-    print(f"[{datetime.now().isoformat(timespec='seconds')}] Placed {side.value} order: {order.id}")
+    bot_log(f"[{datetime.now().isoformat(timespec='seconds')}] Placed {side.value} order: {order.id}", log_file)
 
 
-def sleep_until_market_open(client: TradingClient) -> None:
+def close_position(client: TradingClient, symbol: str, position_qty: int, log_file: Path | None = None) -> None:
+    """Close an open long/short position using a market order."""
+    if position_qty > 0:
+        place_market_order(client, symbol, OrderSide.SELL, position_qty, log_file=log_file)
+    elif position_qty < 0:
+        place_market_order(client, symbol, OrderSide.BUY, abs(position_qty), log_file=log_file)
+
+
+def sleep_until_market_open(client: TradingClient, log_file: Path | None = None) -> None:
     while True:
         clock = client.get_clock()
         if clock.is_open:
-            print("Market is now open. Waking bot and resuming trading loop.")
+            bot_log("Market is now open. Waking bot and resuming trading loop.", log_file)
             return
 
         now_utc = datetime.now(timezone.utc)
@@ -175,11 +233,12 @@ def sleep_until_market_open(client: TradingClient) -> None:
         next_open_et = clock.next_open.astimezone(ZoneInfo("America/New_York"))
         next_open_local = clock.next_open.astimezone()
 
-        print(
+        bot_log(
             "Market closed. Sleeping until market opens. "
             f"Time until open: {hours}h {minutes}m | "
             f"Next open (ET): {next_open_et.strftime('%Y-%m-%d %I:%M %p %Z')} | "
-            f"Local: {next_open_local.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+            f"Local: {next_open_local.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            log_file,
         )
 
         # Sleep in short chunks so we can keep the user updated.
@@ -191,7 +250,8 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
 
     mode = ask_mode()
     api_key, api_secret, base_url = get_credentials(mode)
-    buy_qty, open_interval_seconds = ask_bot_settings()
+    buy_qty, open_interval_seconds, eod_close_minutes, loss_close_threshold = ask_bot_settings()
+    log_file = init_log_file(mode)
 
     paper_flag = mode == "paper"
     client = TradingClient(api_key=api_key, secret_key=api_secret, paper=paper_flag, url_override=base_url)
@@ -217,53 +277,89 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
     sess = _yahoo_session()
 
     account = client.get_account()
-    print(
+    bot_log(
         f"Connected to Alpaca ({mode.upper()}). "
-        f"Account status: {account.status}, buying power: {account.buying_power}"
+        f"Account status: {account.status}, buying power: {account.buying_power}",
+        log_file,
     )
-    print("Bot started for portfolio symbols:")
-    print(", ".join(symbols))
-    print("Decisions come from Investment Possibilities recommendations (Buy/Hold/Caution).")
-    print("Actions: BUY, HOLD, CLOSE (close = sell full open position).")
-    print("It will sleep when market is closed and wake when open.")
-    print("Press Ctrl+C only if you want to request bot exit.")
+    bot_log(f"Session log file: {log_file}", log_file)
+    bot_log("Bot started for portfolio symbols:", log_file)
+    bot_log(", ".join(symbols), log_file)
+    bot_log("Decisions come from Investment Possibilities recommendations (Buy/Hold/Caution).", log_file)
+    bot_log("Actions: BUY, HOLD, CLOSE (close = sell full open position).", log_file)
+    bot_log(
+        f"Risk controls: EOD close window={eod_close_minutes} minutes, "
+        f"loss-close threshold={loss_close_threshold:.2f}",
+        log_file,
+    )
+    bot_log("It will sleep when market is closed and wake when open.", log_file)
+    bot_log("Press Ctrl+C only if you want to request bot exit.", log_file)
 
     while True:
         try:
             clock = client.get_clock()
 
             if not clock.is_open:
-                sleep_until_market_open(client)
+                sleep_until_market_open(client, log_file=log_file)
+                continue
+
+            seconds_to_close = max(0.0, (clock.next_close - datetime.now(timezone.utc)).total_seconds())
+            minutes_to_close = seconds_to_close / 60.0
+            if minutes_to_close <= eod_close_minutes:
+                ts = datetime.now().isoformat(timespec="seconds")
+                bot_log(
+                    f"[{ts}] Market close window reached (<= {eod_close_minutes}m). "
+                    "Force-closing all open portfolio positions.",
+                    log_file,
+                )
+                for symbol in symbols:
+                    position_qty = get_position_qty(client, symbol)
+                    if position_qty != 0:
+                        bot_log(f"- {symbol}: end-of-day close for qty {position_qty}", log_file)
+                        close_position(client, symbol, position_qty, log_file=log_file)
+
+                sleep_until_market_open(client, log_file=log_file)
                 continue
 
             ts = datetime.now().isoformat(timespec="seconds")
-            print(f"[{ts}] Market OPEN | scanning portfolio symbols...")
+            bot_log(f"[{ts}] Market OPEN | scanning portfolio symbols...", log_file)
 
             for symbol in symbols:
                 if not is_symbol_tradable(client, symbol):
-                    print(f"- {symbol}: not tradable in Alpaca account, skipping.")
+                    bot_log(f"- {symbol}: not tradable in Alpaca account, skipping.", log_file)
                     continue
 
                 position_qty = get_position_qty(client, symbol)
                 action, reason = symbol_action_from_investment_possibilities(symbol, position_qty, sess)
-                print(f"- {symbol}: action={action}, position={position_qty}, basis='{reason}'")
+                bot_log(f"- {symbol}: action={action}, position={position_qty}, basis='{reason}'", log_file)
+
+                if position_qty != 0:
+                    unrealized_pl = get_unrealized_pl(client, symbol)
+                    if unrealized_pl is not None and unrealized_pl < loss_close_threshold:
+                        bot_log(
+                            f"- {symbol}: unrealized P/L {unrealized_pl:.2f} < {loss_close_threshold:.2f}, "
+                            "force-closing position to limit losses.",
+                            log_file,
+                        )
+                        close_position(client, symbol, position_qty, log_file=log_file)
+                        continue
 
                 if action == "BUY" and position_qty == 0:
-                    place_market_order(client, symbol, OrderSide.BUY, buy_qty)
-                elif action == "CLOSE" and position_qty > 0:
-                    place_market_order(client, symbol, OrderSide.SELL, position_qty)
+                    place_market_order(client, symbol, OrderSide.BUY, buy_qty, log_file=log_file)
+                elif action == "CLOSE" and position_qty != 0:
+                    close_position(client, symbol, position_qty, log_file=log_file)
 
             time.sleep(open_interval_seconds)
 
         except KeyboardInterrupt:
             cmd = input("\nBot interrupt detected. Type EXIT to stop bot, or press Enter to continue: ").strip().upper()
             if cmd == "EXIT":
-                print("Stopping bot by user request.")
+                bot_log("Stopping bot by user request.", log_file)
                 break
-            print("Continuing bot session.")
+            bot_log("Continuing bot session.", log_file)
             continue
         except Exception as exc:
-            print(f"Bot error: {exc}")
+            bot_log(f"Bot error: {exc}", log_file)
             # Sleep briefly to avoid tight retry loop on API/network issues.
             time.sleep(30)
 
