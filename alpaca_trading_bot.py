@@ -89,13 +89,13 @@ def get_credentials(mode: str) -> tuple[str, str, str]:
     return api_key, api_secret, base_url
 
 
-def ask_bot_settings() -> tuple[int, int, int, float]:
+def ask_bot_settings() -> tuple[int, int, int, float, float, str]:
     qty_text = input("Order quantity (default 1): ").strip() or "1"
     qty = int(qty_text)
     if qty <= 0:
         raise ValueError("Quantity must be a positive integer.")
 
-    interval_text = input("Check interval in seconds while market is open (default 60): ").strip() or "60"
+    interval_text = input("Check interval in seconds while market is open (default 15): ").strip() or "15"
     interval_seconds = int(interval_text)
     if interval_seconds < 5:
         interval_seconds = 5
@@ -110,7 +110,16 @@ def ask_bot_settings() -> tuple[int, int, int, float]:
     ).strip() or "0"
     loss_close_threshold = float(loss_text)
 
-    return qty, interval_seconds, eod_close_minutes, loss_close_threshold
+    drawdown_text = input(
+        "Close open positions when unrealized P/L falls this much from its session peak (default 1.00): "
+    ).strip() or "1.00"
+    peak_drawdown_close_threshold = max(0.0, float(drawdown_text))
+
+    entry_mode_text = input("Entry mode ([R]elaxed / [N]ormal / [S]trict, default N): ").strip().lower() or "n"
+    entry_mode_map = {"r": "relaxed", "relaxed": "relaxed", "n": "normal", "normal": "normal", "s": "strict", "strict": "strict"}
+    entry_mode = entry_mode_map.get(entry_mode_text, "normal")
+
+    return qty, interval_seconds, eod_close_minutes, loss_close_threshold, peak_drawdown_close_threshold, entry_mode
 
 
 def get_position_qty(client: TradingClient, symbol: str) -> int:
@@ -150,21 +159,34 @@ def _extract_recommendation(assessment_md: str) -> str:
     return rec
 
 
-def recommendation_to_action(recommendation: str, position_qty: int) -> str:
+def recommendation_to_action(recommendation: str, position_qty: int, entry_mode: str = "normal") -> str:
     """Map Investment Possibilities recommendation text to bot action."""
+    mode = (entry_mode or "normal").strip().lower()
+    if mode not in {"relaxed", "normal", "strict"}:
+        mode = "normal"
+
     rec = recommendation.lower()
     if rec.startswith("buy"):
         return "BUY"
     if rec.startswith("hold / accumulate"):
-        return "BUY" if position_qty <= 0 else "HOLD"
+        if position_qty > 0:
+            return "HOLD"
+        return "BUY" if mode in {"relaxed", "normal"} else "HOLD"
     if rec.startswith("hold"):
+        if mode == "relaxed" and position_qty <= 0:
+            return "BUY"
         return "HOLD"
     if rec.startswith("caution") or rec.startswith("no action"):
         return "CLOSE" if position_qty > 0 else "HOLD"
     return "HOLD"
 
 
-def symbol_action_from_investment_possibilities(symbol: str, position_qty: int, session) -> tuple[str, str]:
+def symbol_action_from_investment_possibilities(
+    symbol: str,
+    position_qty: int,
+    session,
+    entry_mode: str = "normal",
+) -> tuple[str, str]:
     ph, info = get_history(symbol, session=session)
     if ph is None or ph.empty or "Close" not in ph.columns:
         return "HOLD", "insufficient-history"
@@ -174,7 +196,7 @@ def symbol_action_from_investment_possibilities(symbol: str, position_qty: int, 
     if not recommendation:
         return "HOLD", "no-recommendation"
 
-    action = recommendation_to_action(recommendation, position_qty)
+    action = recommendation_to_action(recommendation, position_qty, entry_mode=entry_mode)
     return action, recommendation
 
 
@@ -250,7 +272,14 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
 
     mode = ask_mode()
     api_key, api_secret, base_url = get_credentials(mode)
-    buy_qty, open_interval_seconds, eod_close_minutes, loss_close_threshold = ask_bot_settings()
+    (
+        buy_qty,
+        open_interval_seconds,
+        eod_close_minutes,
+        loss_close_threshold,
+        peak_drawdown_close_threshold,
+        entry_mode,
+    ) = ask_bot_settings()
     log_file = init_log_file(mode)
 
     paper_flag = mode == "paper"
@@ -287,13 +316,17 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
     bot_log(", ".join(symbols), log_file)
     bot_log("Decisions come from Investment Possibilities recommendations (Buy/Hold/Caution).", log_file)
     bot_log("Actions: BUY, HOLD, CLOSE (close = sell full open position).", log_file)
+    bot_log(f"Entry mode: {entry_mode} (relaxed buys more often, strict buys only on Buy).", log_file)
     bot_log(
         f"Risk controls: EOD close window={eod_close_minutes} minutes, "
-        f"loss-close threshold={loss_close_threshold:.2f}",
+        f"loss-close threshold={loss_close_threshold:.2f}, "
+        f"peak drawdown threshold={peak_drawdown_close_threshold:.2f}",
         log_file,
     )
     bot_log("It will sleep when market is closed and wake when open.", log_file)
     bot_log("Press Ctrl+C only if you want to request bot exit.", log_file)
+
+    peak_unrealized_by_symbol: dict[str, float] = {}
 
     while True:
         try:
@@ -317,6 +350,7 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
                     if position_qty != 0:
                         bot_log(f"- {symbol}: end-of-day close for qty {position_qty}", log_file)
                         close_position(client, symbol, position_qty, log_file=log_file)
+                        peak_unrealized_by_symbol.pop(symbol, None)
 
                 sleep_until_market_open(client, log_file=log_file)
                 continue
@@ -330,24 +364,49 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
                     continue
 
                 position_qty = get_position_qty(client, symbol)
-                action, reason = symbol_action_from_investment_possibilities(symbol, position_qty, sess)
+                action, reason = symbol_action_from_investment_possibilities(
+                    symbol,
+                    position_qty,
+                    sess,
+                    entry_mode=entry_mode,
+                )
                 bot_log(f"- {symbol}: action={action}, position={position_qty}, basis='{reason}'", log_file)
 
                 if position_qty != 0:
                     unrealized_pl = get_unrealized_pl(client, symbol)
-                    if unrealized_pl is not None and unrealized_pl < loss_close_threshold:
-                        bot_log(
-                            f"- {symbol}: unrealized P/L {unrealized_pl:.2f} < {loss_close_threshold:.2f}, "
-                            "force-closing position to limit losses.",
-                            log_file,
-                        )
-                        close_position(client, symbol, position_qty, log_file=log_file)
-                        continue
+                    if unrealized_pl is not None:
+                        prev_peak = peak_unrealized_by_symbol.get(symbol, unrealized_pl)
+                        current_peak = max(prev_peak, unrealized_pl)
+                        peak_unrealized_by_symbol[symbol] = current_peak
+
+                        if unrealized_pl < loss_close_threshold:
+                            bot_log(
+                                f"- {symbol}: unrealized P/L {unrealized_pl:.2f} < {loss_close_threshold:.2f}, "
+                                "force-closing position to limit losses.",
+                                log_file,
+                            )
+                            close_position(client, symbol, position_qty, log_file=log_file)
+                            peak_unrealized_by_symbol.pop(symbol, None)
+                            continue
+
+                        drawdown = current_peak - unrealized_pl
+                        if current_peak > 0 and peak_drawdown_close_threshold > 0 and drawdown >= peak_drawdown_close_threshold:
+                            bot_log(
+                                f"- {symbol}: unrealized drawdown {drawdown:.2f} from peak {current_peak:.2f} "
+                                f">= {peak_drawdown_close_threshold:.2f}, force-closing position.",
+                                log_file,
+                            )
+                            close_position(client, symbol, position_qty, log_file=log_file)
+                            peak_unrealized_by_symbol.pop(symbol, None)
+                            continue
+                else:
+                    peak_unrealized_by_symbol.pop(symbol, None)
 
                 if action == "BUY" and position_qty == 0:
                     place_market_order(client, symbol, OrderSide.BUY, buy_qty, log_file=log_file)
                 elif action == "CLOSE" and position_qty != 0:
                     close_position(client, symbol, position_qty, log_file=log_file)
+                    peak_unrealized_by_symbol.pop(symbol, None)
 
             time.sleep(open_interval_seconds)
 

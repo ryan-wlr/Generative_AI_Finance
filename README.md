@@ -144,13 +144,23 @@ From `python cli_app.py`, choose:
 Behavior:
 
 - Prompts for paper or live mode
+- Prompts for startup settings:
+  - Check interval while market is open (default: 15 seconds)
+  - End-of-day force-close window (minutes before close)
+  - Unrealized P/L loss-close threshold
+  - Peak unrealized drawdown-close threshold
+  - Entry mode: `relaxed`, `normal`, or `strict`
 - Loads all portfolio tickers from the current CSV session
 - Uses Investment Possibilities-style recommendations to map actions
   - `Buy` -> `BUY`
-  - `Hold` -> `HOLD`
+  - `Hold / accumulate` -> `BUY` (in `normal` and `relaxed` when no position exists)
+  - `Hold` -> `BUY` only in `relaxed` when no position exists, otherwise `HOLD`
   - `Caution/No action` -> `CLOSE` (if position exists)
 - Checks market clock and only trades when open
 - Prints sleep/wake status and time until next market open when closed
+- Exits open positions early when risk rules are breached:
+  - Unrealized P/L below your loss threshold
+  - Unrealized P/L drops from its session peak by at least your drawdown threshold
 
 ## CSV Input Format
 
