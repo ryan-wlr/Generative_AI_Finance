@@ -33,6 +33,11 @@ from utils import (
     compute_sharpe_ratio,
     compute_rsi,
     compute_macd,
+    compute_macd_cmf_ema_supertrend,
+    plot_macd_cmf_ema_supertrend,
+    build_tradesmart_paper_trades,
+    get_alpaca_trading_client,
+    execute_tradesmart_signal_on_alpaca,
     format_new_instrument_assessment,
     build_portfolio_kpi_dataframe,
     generate_portfolio_ai_markdown,
@@ -63,6 +68,8 @@ if "rsi_flag" not in st.session_state:
     st.session_state.rsi_flag = False
 if "macd_flag" not in st.session_state:
     st.session_state.macd_flag = False
+if "tradesmart_flag" not in st.session_state:
+    st.session_state.tradesmart_flag = False
 if "idea_tickers" not in st.session_state:
     st.session_state.idea_tickers = []
 # Default idea tickers (course: portfolio & new instruments) — once per session.
@@ -314,8 +321,17 @@ if st.session_state.data_loaded:
 
         with tab4:
             st.markdown("### 📉 Stock analysis")
-            subtab1, subtab2, subtab3, subtab4, subtab5, subtab6, subtab7 = st.tabs(
-                ["Moving Average", "Volatility", "P/E Ratio", "Beta", "Sharpe Ratio", "RSI", "MACD"]
+            subtab1, subtab2, subtab3, subtab4, subtab5, subtab6, subtab7, subtab8 = st.tabs(
+                [
+                    "Moving Average",
+                    "Volatility",
+                    "P/E Ratio",
+                    "Beta",
+                    "Sharpe Ratio",
+                    "RSI",
+                    "MACD",
+                    "MACD+CMF+EMA+Supertrend",
+                ]
             )
             with subtab1:
                 if st.button("📊 Analyze holdings", key="btn_stock_analyze"):
@@ -605,6 +621,58 @@ if st.session_state.data_loaded:
                                 st.pyplot(fig_m, use_container_width=True)
                     else:
                         st.warning("Could not compute MACD for any ticker.")
+            with subtab8:
+                st.markdown("##### MACD + CMF + EMA + Supertrend")
+                st.markdown("##### Key points")
+                st.markdown(
+                    """
+- This setup combines **trend** (EMA), **momentum** (MACD), **money flow** (CMF), and **trend state** (Supertrend) into one rule set.
+- Entry signals use a **MACD double-cross sequence** (TradeSmart style):
+    one cross in the opposite direction and then a confirming cross in the trade direction,
+    with zero-line re-arm and zero-touch skip logic.
+- A **Bullish** entry additionally requires: CMF > 0, Close > EMA, and bullish Supertrend.
+- A **Bearish** entry additionally requires: CMF < 0, Close < EMA, and bearish Supertrend.
+- **What this tab does:** Computes these indicators for each portfolio ticker and shows the latest signal plus a full 3-panel chart.
+"""
+                )
+                if st.button("📊 Show strategy signals", key="btn_tradesmart_analyze"):
+                    st.session_state.tradesmart_flag = True
+                if not st.session_state.tradesmart_flag:
+                    st.caption("Click to compute MACD+CMF+EMA+Supertrend signals per ticker.")
+                else:
+                    strategy_data = {}
+                    for ticker in st.session_state.df["Ticker"].astype(str).str.strip().unique():
+                        ind_df, summary = compute_macd_cmf_ema_supertrend(ticker)
+                        if ind_df is not None and summary is not None:
+                            strategy_data[ticker] = (ind_df, summary)
+
+                    if strategy_data:
+                        st.markdown("##### Latest strategy signal by ticker")
+                        signal_icon = {"Bullish": "🟢", "Bearish": "🔴", "Neutral": "⚪"}
+                        for t, (_, s) in strategy_data.items():
+                            icon = signal_icon.get(s["strategy_signal"], "⚪")
+                            recent = s.get("recent_signal", "Neutral")
+                            recent_dt = s.get("recent_signal_date")
+                            recent_txt = f"{recent} on {recent_dt}" if recent_dt else recent
+                            st.markdown(
+                                f"- **Ticker:** {t} — **Signal:** **{s['strategy_signal']}** {icon} "
+                                f"| **Most recent trigger:** **{recent_txt}** "
+                                f"(CMF: {s['cmf']:.2f}, MACD: {s['macd']:.2f}, Signal: {s['signal']:.2f})"
+                            )
+                        st.markdown("---")
+                        with st.expander("📈 Strategy diagnostics (price + MACD + CMF)"):
+                            for t, (ind_df, s) in strategy_data.items():
+                                st.markdown(f"**{t}**")
+                                c1, c2, c3, c4 = st.columns(4)
+                                c1.metric("Close", f"{s['close']:.2f}")
+                                c2.metric("EMA", f"{s['ema']:.2f}")
+                                c3.metric("CMF", f"{s['cmf']:.2f}")
+                                c4.metric("Supertrend", "Bullish" if s["st_bull"] else "Bearish")
+                                fig_ts = plot_macd_cmf_ema_supertrend(ind_df, t)
+                                if fig_ts is not None:
+                                    st.pyplot(fig_ts, use_container_width=True)
+                    else:
+                        st.warning("Could not compute MACD+CMF+EMA+Supertrend for any ticker.")
 
         with tab5:
             st.markdown("### ✨ AI Recommendations")
@@ -865,6 +933,139 @@ if st.session_state.data_loaded:
                             st.markdown(f"- **{sym}**: price unavailable")
                 else:
                     st.info("Could not load prices right now. Try again in a moment.")
+
+                st.markdown("---")
+                st.markdown("#### TradeSmart strategy trades (paper)")
+                st.caption(
+                    "Generates paper trade actions from MACD+CMF+EMA+Supertrend signals for your candidate tickers. "
+                    "Educational only, not live broker execution."
+                )
+
+                run_trade_gen = st.button("⚙️ Generate strategy trades", key="btn_idea_strategy_trades")
+                generated_signals = {}
+                if run_trade_gen:
+                    trade_rows = []
+                    for sym in idea_syms:
+                        ind_df, summary = compute_macd_cmf_ema_supertrend(sym)
+                        if ind_df is None or summary is None:
+                            continue
+                        generated_signals[sym] = summary.get("strategy_signal", "Neutral")
+                        trades_df, state = build_tradesmart_paper_trades(sym, ind_df, lookback_bars=220)
+                        now_signal = summary.get("strategy_signal", "Neutral")
+                        recent_signal = summary.get("recent_signal", "Neutral")
+                        recent_date = summary.get("recent_signal_date") or "n/a"
+
+                        if now_signal == "Bullish":
+                            suggested_action = "BUY"
+                        elif now_signal == "Bearish":
+                            suggested_action = "SELL"
+                        elif recent_signal == "Bullish":
+                            suggested_action = "HOLD_LONG_BIAS"
+                        elif recent_signal == "Bearish":
+                            suggested_action = "HOLD_SHORT_BIAS"
+                        else:
+                            suggested_action = "WAIT"
+
+                        trade_rows.append(
+                            {
+                                "Ticker": sym,
+                                "Current Signal": now_signal,
+                                "Recent Signal": recent_signal,
+                                "Recent Signal Date": recent_date,
+                                "Suggested Action": suggested_action,
+                                "Position State": state.get("position", "Flat"),
+                                "Last Action": state.get("last_action", "None"),
+                                "CMF": summary.get("cmf", np.nan),
+                                "MACD": summary.get("macd", np.nan),
+                                "Signal": summary.get("signal", np.nan),
+                            }
+                        )
+
+                        with st.expander(f"{sym} trade log"):
+                            if trades_df is None or trades_df.empty:
+                                st.info("No entry events were triggered in the selected lookback window.")
+                            else:
+                                st.dataframe(trades_df, use_container_width=True)
+                            fig_ts = plot_macd_cmf_ema_supertrend(ind_df, sym)
+                            if fig_ts is not None:
+                                st.pyplot(fig_ts, use_container_width=True)
+
+                    if trade_rows:
+                        trades_summary_df = pd.DataFrame(trade_rows)
+                        st.markdown("##### Strategy trade summary")
+                        st.dataframe(trades_summary_df, use_container_width=True)
+                    else:
+                        st.warning("Could not generate strategy trades for the saved candidate tickers.")
+
+                st.markdown("##### Alpaca execution (paper/live)")
+                st.caption(
+                    "Executes current TradeSmart signals in Alpaca. Default behavior is long-only: bullish opens/holds long, bearish closes long."
+                )
+                exec_mode = st.radio(
+                    "Broker mode",
+                    ["paper", "live"],
+                    horizontal=True,
+                    key="idea_alpaca_exec_mode",
+                )
+                exec_qty = st.number_input(
+                    "Order quantity per symbol",
+                    min_value=1,
+                    value=1,
+                    step=1,
+                    key="idea_alpaca_exec_qty",
+                )
+                allow_short_entries = st.checkbox(
+                    "Allow opening short positions on bearish signals",
+                    value=False,
+                    key="idea_alpaca_allow_short",
+                )
+                if exec_mode == "live":
+                    st.warning("Live mode sends real orders. Use only after verifying API keys, symbol list, and market status.")
+                    live_confirm = st.text_input(
+                        "Type LIVE to confirm real execution",
+                        key="idea_live_confirm_text",
+                    )
+                else:
+                    live_confirm = ""
+
+                run_exec = st.button("🚀 Execute strategy on Alpaca", key="btn_idea_execute_alpaca")
+                if run_exec:
+                    if exec_mode == "live" and live_confirm.strip() != "LIVE":
+                        st.error("Live execution not confirmed. Type LIVE exactly to continue.")
+                    else:
+                        if not generated_signals:
+                            for sym in idea_syms:
+                                _, summary = compute_macd_cmf_ema_supertrend(sym)
+                                if summary is not None:
+                                    generated_signals[sym] = summary.get("strategy_signal", "Neutral")
+
+                        if not generated_signals:
+                            st.warning("No strategy signals available to execute.")
+                        else:
+                            with st.spinner("⏳ Sending orders to Alpaca…"):
+                                try:
+                                    client = get_alpaca_trading_client(exec_mode)
+                                except Exception as e:
+                                    st.error(f"Could not initialize Alpaca client: {e}")
+                                    client = None
+
+                                if client is not None:
+                                    execution_rows = []
+                                    for sym, sig in generated_signals.items():
+                                        res = execute_tradesmart_signal_on_alpaca(
+                                            client,
+                                            sym,
+                                            sig,
+                                            order_qty=int(exec_qty),
+                                            allow_short_entries=allow_short_entries,
+                                        )
+                                        execution_rows.append(res)
+
+                                    if execution_rows:
+                                        st.markdown("###### Execution results")
+                                        st.dataframe(pd.DataFrame(execution_rows), use_container_width=True)
+                                    else:
+                                        st.info("No orders were sent.")
             else:
                 st.caption(
                     "After you add tickers with **+ Submit**, a live write-up is generated here from the latest data."

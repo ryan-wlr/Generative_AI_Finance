@@ -28,6 +28,7 @@ The project supports:
   - Sharpe ratio
   - RSI
   - MACD
+  - Selection 8 strategy: MACD + CMF + EMA + Supertrend (TradeSmart-style signal logic)
 - AI recommendations tab:
   - Volatility, P/E, beta, Sharpe, and MACD summaries
   - Explanations for how to interpret each metric
@@ -35,6 +36,8 @@ The project supports:
   - Add candidate tickers
   - Live per-instrument write-ups using the same analytics engine
   - Latest prices for saved tickers
+  - Selection 8 paper-trade signal logs per candidate ticker
+  - Alpaca execution panel (paper/live) for Selection 8 signals
   - Portfolio analysis table for holdings and candidates
   - Overall portfolio note (heuristic/AI-style synthesis)
 - CLI app for terminal usage
@@ -161,6 +164,32 @@ Behavior:
 - Exits open positions early when risk rules are breached:
   - Unrealized P/L below your loss threshold
   - Unrealized P/L drops from its session peak by at least your drawdown threshold
+
+## Selection 8 Strategy Trading (Streamlit)
+
+In the Streamlit app, go to:
+
+- `Stock analysis` -> `MACD+CMF+EMA+Supertrend` (Selection 8)
+
+This tab computes TradeSmart-style signal components and shows:
+
+- Current strategy signal (`Bullish`, `Bearish`, `Neutral`)
+- Most recent trigger direction/date
+- Diagnostic charts (price + EMA + supertrend, MACD panel, CMF panel)
+
+To place broker orders from these signals:
+
+- Open `Investment Possibilities`
+- Click `Generate strategy trades`
+- Use `Alpaca execution (paper/live)`
+- Choose mode (`paper` or `live`), quantity, and optional shorting
+- Click `Execute strategy on Alpaca`
+
+Safety behavior:
+
+- `live` mode requires typed confirmation (`LIVE`)
+- Symbol tradability is checked before order submission
+- Default execution is long-only unless shorting is explicitly enabled
 
 ## CSV Input Format
 

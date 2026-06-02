@@ -33,7 +33,7 @@ CHART_HISTORY_URL = (
 
 def history_from_yahoo_chart_api(session, symbol: str):
     """
-    Build a price DataFrame (DatetimeIndex, Close) from Yahoo's chart endpoint.
+    Build a price DataFrame (DatetimeIndex, OHLCV) from Yahoo's chart endpoint.
     Same session/headers as spot prices — works when yfinance returns empty.
     """
     symbol = str(symbol).strip()
@@ -52,16 +52,39 @@ def history_from_yahoo_chart_api(session, symbol: str):
         ts = res0.get("timestamp") or []
         quotes = (res0.get("indicators") or {}).get("quote") or [{}]
         q0 = quotes[0] if quotes else {}
+        opens = q0.get("open") or []
+        highs = q0.get("high") or []
+        lows = q0.get("low") or []
         closes = q0.get("close") or []
+        vols = q0.get("volume") or []
         if not ts or not closes:
             return None
-        n = min(len(ts), len(closes))
+        n = min(len(ts), len(opens), len(highs), len(lows), len(closes), len(vols))
         if n < 1:
             return None
-        ts, closes = ts[:n], closes[:n]
+        ts = ts[:n]
+        opens = opens[:n]
+        highs = highs[:n]
+        lows = lows[:n]
+        closes = closes[:n]
+        vols = vols[:n]
         idx = pd.to_datetime(ts, unit="s")
-        df = pd.DataFrame({"Close": closes}, index=idx)
+        df = pd.DataFrame(
+            {
+                "Open": opens,
+                "High": highs,
+                "Low": lows,
+                "Close": closes,
+                "Volume": vols,
+            },
+            index=idx,
+        )
         df = df.loc[pd.notna(df["Close"]) & (df["Close"] > 0)]
+        for col in ("Open", "High", "Low"):
+            if col in df.columns:
+                df[col] = df[col].where(pd.notna(df[col]), df["Close"])
+        if "Volume" in df.columns:
+            df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0.0)
         if df.empty:
             return None
         return df.sort_index()
@@ -619,6 +642,545 @@ def compute_macd(ticker, fast=12, slow=26, signal=9):
     if out.empty:
         return None
     return out
+
+
+def _compute_supertrend_from_ohlc(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    atr_period: int = 10,
+    multiplier: float = 3.0,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Supertrend line + trend direction from OHLC.
+    Returns (supertrend_line, is_bullish).
+    """
+    h = high.astype(float)
+    l = low.astype(float)
+    c = close.astype(float)
+
+    prev_close = c.shift(1)
+    tr = pd.concat(
+        [
+            (h - l),
+            (h - prev_close).abs(),
+            (l - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.ewm(alpha=1 / atr_period, adjust=False, min_periods=atr_period).mean()
+
+    hl2 = (h + l) / 2.0
+    basic_upper = hl2 + (multiplier * atr)
+    basic_lower = hl2 - (multiplier * atr)
+
+    final_upper = basic_upper.copy()
+    final_lower = basic_lower.copy()
+
+    for i in range(1, len(c)):
+        if pd.isna(final_upper.iloc[i - 1]):
+            continue
+        if (basic_upper.iloc[i] < final_upper.iloc[i - 1]) or (c.iloc[i - 1] > final_upper.iloc[i - 1]):
+            final_upper.iloc[i] = basic_upper.iloc[i]
+        else:
+            final_upper.iloc[i] = final_upper.iloc[i - 1]
+
+        if (basic_lower.iloc[i] > final_lower.iloc[i - 1]) or (c.iloc[i - 1] < final_lower.iloc[i - 1]):
+            final_lower.iloc[i] = basic_lower.iloc[i]
+        else:
+            final_lower.iloc[i] = final_lower.iloc[i - 1]
+
+    st_line = pd.Series(index=c.index, dtype=float)
+    bullish = pd.Series(index=c.index, dtype=bool)
+
+    for i in range(len(c)):
+        if i == 0:
+            bullish.iloc[i] = True
+            st_line.iloc[i] = final_lower.iloc[i]
+            continue
+
+        prev_bull = bool(bullish.iloc[i - 1]) if pd.notna(bullish.iloc[i - 1]) else True
+        if prev_bull:
+            bullish.iloc[i] = c.iloc[i] >= final_lower.iloc[i]
+        else:
+            bullish.iloc[i] = c.iloc[i] > final_upper.iloc[i]
+        st_line.iloc[i] = final_lower.iloc[i] if bullish.iloc[i] else final_upper.iloc[i]
+
+    return st_line, bullish
+
+
+def _tradesmart_macd_double_cross_events(
+    macd: pd.Series,
+    signal: pd.Series,
+    *,
+    zero_touch_eps: float = 1e-10,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    TradeSmart-like MACD event sequencing.
+
+    Long event:
+    - MACD/Signal must first re-arm by going below zero,
+    - then a cross-down and cross-up sequence above zero,
+    - and no zero-line touch between those two crosses.
+
+    Short event:
+    - MACD/Signal must first re-arm by going above zero,
+    - then a cross-up and cross-down sequence below zero,
+    - and no zero-line touch between those two crosses.
+    """
+    m = macd.astype(float)
+    s = signal.astype(float)
+
+    cross_up = (m > s) & (m.shift(1) <= s.shift(1))
+    cross_down = (m < s) & (m.shift(1) >= s.shift(1))
+    touch_zero = (m.abs() <= zero_touch_eps) | (s.abs() <= zero_touch_eps)
+
+    long_evt = pd.Series(False, index=m.index, dtype=bool)
+    short_evt = pd.Series(False, index=m.index, dtype=bool)
+
+    long_armed = False
+    short_armed = False
+    long_stage = 0
+    short_stage = 0
+    long_invalid = False
+    short_invalid = False
+
+    for i in range(len(m)):
+        mv = m.iloc[i]
+        sv = s.iloc[i]
+        if pd.isna(mv) or pd.isna(sv):
+            continue
+
+        # Re-arm conditions for the next valid sequence.
+        if (mv < 0) or (sv < 0):
+            long_armed = True
+            long_stage = 0
+            long_invalid = False
+        if (mv > 0) or (sv > 0):
+            short_armed = True
+            short_stage = 0
+            short_invalid = False
+
+        # Zero-line touch after first stage invalidates the pending setup.
+        if touch_zero.iloc[i]:
+            if long_stage == 1:
+                long_invalid = True
+            if short_stage == 1:
+                short_invalid = True
+
+        # Long: down-cross then up-cross above zero.
+        if long_armed:
+            if (long_stage == 0) and cross_down.iloc[i] and (mv > 0) and (sv > 0):
+                long_stage = 1
+            elif (long_stage == 1) and cross_up.iloc[i] and (mv > 0) and (sv > 0):
+                if not long_invalid:
+                    long_evt.iloc[i] = True
+                    long_armed = False
+                long_stage = 0
+                long_invalid = False
+
+        # Short: up-cross then down-cross below zero.
+        if short_armed:
+            if (short_stage == 0) and cross_up.iloc[i] and (mv < 0) and (sv < 0):
+                short_stage = 1
+            elif (short_stage == 1) and cross_down.iloc[i] and (mv < 0) and (sv < 0):
+                if not short_invalid:
+                    short_evt.iloc[i] = True
+                    short_armed = False
+                short_stage = 0
+                short_invalid = False
+
+    return long_evt, short_evt
+
+
+def compute_macd_cmf_ema_supertrend(
+    ticker,
+    *,
+    ema_period: int = 200,
+    cmf_period: int = 20,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
+    st_atr_period: int = 10,
+    st_multiplier: float = 3.0,
+):
+    """TradeSmart-style strategy components from price history.
+
+    Uses MACD double-cross sequencing with zero-line re-arm/touch constraints,
+    then applies CMF, EMA, and Supertrend filters for final long/short events.
+    Returns DataFrame with indicators and latest summary dict.
+    """
+    price_history, _ = get_history(ticker)
+    if price_history is None or price_history.empty:
+        return None, None
+    required = {"Close", "High", "Low", "Volume"}
+    if not required.issubset(set(price_history.columns)):
+        return None, None
+
+    df = price_history[["Close", "High", "Low", "Volume"]].copy()
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    volume = pd.to_numeric(df["Volume"], errors="coerce").fillna(0.0)
+
+    df["EMA"] = close.ewm(span=ema_period, adjust=False).mean()
+
+    mfm_den = (high - low).replace(0, np.nan)
+    mfm = ((close - low) - (high - close)) / mfm_den
+    mfv = mfm.fillna(0.0) * volume
+    vol_sum = volume.rolling(cmf_period).sum()
+    df["CMF"] = (mfv.rolling(cmf_period).sum() / vol_sum.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+    ema_fast = close.ewm(span=macd_fast, adjust=False).mean()
+    ema_slow = close.ewm(span=macd_slow, adjust=False).mean()
+    df["MACD"] = ema_fast - ema_slow
+    df["Signal"] = df["MACD"].ewm(span=macd_signal, adjust=False).mean()
+    df["Histogram"] = df["MACD"] - df["Signal"]
+
+    long_evt, short_evt = _tradesmart_macd_double_cross_events(df["MACD"], df["Signal"])
+    df["MACD_Long_Event"] = long_evt
+    df["MACD_Short_Event"] = short_evt
+
+    st_line, st_bull = _compute_supertrend_from_ohlc(
+        high,
+        low,
+        close,
+        atr_period=st_atr_period,
+        multiplier=st_multiplier,
+    )
+    df["Supertrend"] = st_line
+    df["ST_Bull"] = st_bull
+
+    df["Long_Entry"] = (
+        df["MACD_Long_Event"]
+        & (df["CMF"] > 0)
+        & (df["Close"] > df["EMA"])
+        & df["ST_Bull"]
+    )
+    df["Short_Entry"] = (
+        df["MACD_Short_Event"]
+        & (df["CMF"] < 0)
+        & (df["Close"] < df["EMA"])
+        & (~df["ST_Bull"])
+    )
+
+    out = df.dropna(subset=["EMA", "CMF", "MACD", "Signal", "Supertrend"]).copy()
+    if out.empty:
+        return None, None
+
+    last = out.iloc[-1]
+    if bool(last["Long_Entry"]):
+        strategy_signal = "Bullish"
+    elif bool(last["Short_Entry"]):
+        strategy_signal = "Bearish"
+    else:
+        strategy_signal = "Neutral"
+
+    recent = out.tail(200)
+    recent_long_idx = recent.index[recent["Long_Entry"]]
+    recent_short_idx = recent.index[recent["Short_Entry"]]
+    if len(recent_long_idx) and len(recent_short_idx):
+        latest_idx = max(recent_long_idx[-1], recent_short_idx[-1])
+        last_signal = "Bullish" if latest_idx == recent_long_idx[-1] else "Bearish"
+    elif len(recent_long_idx):
+        latest_idx = recent_long_idx[-1]
+        last_signal = "Bullish"
+    elif len(recent_short_idx):
+        latest_idx = recent_short_idx[-1]
+        last_signal = "Bearish"
+    else:
+        latest_idx = None
+        last_signal = "Neutral"
+
+    summary = {
+        "close": float(last["Close"]),
+        "ema": float(last["EMA"]),
+        "cmf": float(last["CMF"]),
+        "macd": float(last["MACD"]),
+        "signal": float(last["Signal"]),
+        "st_bull": bool(last["ST_Bull"]),
+        "strategy_signal": strategy_signal,
+        "recent_signal": last_signal,
+        "recent_signal_date": latest_idx.strftime("%Y-%m-%d") if latest_idx is not None else None,
+    }
+    return out, summary
+
+
+def plot_macd_cmf_ema_supertrend(indicator_df: pd.DataFrame, ticker: str):
+    """
+    Matplotlib figure for MACD+CMF+EMA+Supertrend strategy diagnostics.
+    """
+    if indicator_df is None or indicator_df.empty:
+        return None
+
+    fig, (ax_p, ax_m, ax_c) = plt.subplots(
+        3,
+        1,
+        figsize=(11, 9),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.2, 1.2, 1.0]},
+    )
+
+    ax_p.plot(indicator_df.index, indicator_df["Close"], label="Close", color="#2C3E50", linewidth=1.4)
+    ax_p.plot(indicator_df.index, indicator_df["EMA"], label="EMA", color="#E67E22", linewidth=1.2)
+    ax_p.plot(indicator_df.index, indicator_df["Supertrend"], label="Supertrend", color="#16A085", linewidth=1.2)
+    ax_p.set_title(f"{ticker} — MACD + CMF + EMA + Supertrend")
+    ax_p.set_ylabel("Price")
+    ax_p.grid(True, alpha=0.25)
+    ax_p.legend(loc="upper left")
+
+    ax_m.plot(indicator_df.index, indicator_df["MACD"], label="MACD", color="#1F77B4")
+    ax_m.plot(indicator_df.index, indicator_df["Signal"], label="Signal", color="#FF7F0E")
+    ax_m.bar(indicator_df.index, indicator_df["Histogram"], label="Histogram", color="#95A5A6", alpha=0.4)
+    ax_m.axhline(0, color="#666666", linewidth=1)
+    ax_m.set_ylabel("MACD")
+    ax_m.grid(True, alpha=0.25)
+    ax_m.legend(loc="upper left")
+
+    ax_c.plot(indicator_df.index, indicator_df["CMF"], label="CMF", color="#8E44AD")
+    ax_c.axhline(0, color="#666666", linewidth=1)
+    ax_c.set_ylabel("CMF")
+    ax_c.set_xlabel("Date")
+    ax_c.grid(True, alpha=0.25)
+    ax_c.legend(loc="upper left")
+
+    fig.tight_layout()
+    return fig
+
+
+def build_tradesmart_paper_trades(
+    ticker: str,
+    indicator_df: pd.DataFrame,
+    *,
+    lookback_bars: int = 200,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Build a paper-trade log from TradeSmart long/short entry events.
+
+    Rules:
+    - Long_Entry opens long (and closes short if one is open).
+    - Short_Entry opens short (and closes long if one is open).
+    - No position sizing or fees; this is signal-driven educational tracking.
+    """
+    if indicator_df is None or indicator_df.empty:
+        return pd.DataFrame(), {"position": "Flat", "last_action": "None"}
+
+    df = indicator_df.tail(max(20, int(lookback_bars))).copy()
+    needed = {"Close", "Long_Entry", "Short_Entry"}
+    if not needed.issubset(set(df.columns)):
+        return pd.DataFrame(), {"position": "Flat", "last_action": "None"}
+
+    trades = []
+    position = 0  # 1 long, -1 short, 0 flat
+    last_action = "None"
+
+    for idx, row in df.iterrows():
+        price = float(row["Close"])
+        is_long = bool(row["Long_Entry"])
+        is_short = bool(row["Short_Entry"])
+        dt = idx.strftime("%Y-%m-%d")
+
+        if is_long:
+            if position == -1:
+                trades.append(
+                    {
+                        "Date": dt,
+                        "Ticker": ticker,
+                        "Action": "BUY_TO_CLOSE",
+                        "Price": price,
+                        "Reason": "Opposite TradeSmart long signal",
+                    }
+                )
+            if position <= 0:
+                trades.append(
+                    {
+                        "Date": dt,
+                        "Ticker": ticker,
+                        "Action": "BUY",
+                        "Price": price,
+                        "Reason": "TradeSmart long entry",
+                    }
+                )
+                position = 1
+                last_action = "BUY"
+
+        if is_short:
+            if position == 1:
+                trades.append(
+                    {
+                        "Date": dt,
+                        "Ticker": ticker,
+                        "Action": "SELL_TO_CLOSE",
+                        "Price": price,
+                        "Reason": "Opposite TradeSmart short signal",
+                    }
+                )
+            if position >= 0:
+                trades.append(
+                    {
+                        "Date": dt,
+                        "Ticker": ticker,
+                        "Action": "SELL",
+                        "Price": price,
+                        "Reason": "TradeSmart short entry",
+                    }
+                )
+                position = -1
+                last_action = "SELL"
+
+    position_text = "Long" if position == 1 else "Short" if position == -1 else "Flat"
+    state = {
+        "position": position_text,
+        "last_action": last_action,
+        "bars_scanned": int(len(df)),
+    }
+    if not trades:
+        return pd.DataFrame(), state
+
+    out = pd.DataFrame(trades)
+    out["Price"] = pd.to_numeric(out["Price"], errors="coerce")
+    return out, state
+
+
+def _alpaca_credentials_from_env(mode: str = "paper") -> tuple[str, str, str]:
+    """Load Alpaca credentials for paper/live mode from environment variables."""
+    m = (mode or "paper").strip().lower()
+    prefix = "ALPACA_PAPER" if m == "paper" else "ALPACA_LIVE"
+    api_key = os.getenv(f"{prefix}_API_KEY", "").strip()
+    api_secret = os.getenv(f"{prefix}_API_SECRET", "").strip()
+    base_url = os.getenv(f"{prefix}_BASE_URL", "").strip()
+    if not api_key or not api_secret or not base_url:
+        raise ValueError(
+            f"Missing {m} credentials. Set {prefix}_API_KEY, {prefix}_API_SECRET, and {prefix}_BASE_URL."
+        )
+    return api_key, api_secret, base_url
+
+
+def get_alpaca_trading_client(mode: str = "paper"):
+    """Create Alpaca TradingClient for paper/live mode using .env credentials."""
+    from alpaca.trading.client import TradingClient
+
+    m = (mode or "paper").strip().lower()
+    api_key, api_secret, base_url = _alpaca_credentials_from_env(m)
+    return TradingClient(
+        api_key=api_key,
+        secret_key=api_secret,
+        paper=(m == "paper"),
+        url_override=base_url,
+    )
+
+
+def _alpaca_position_qty(client, symbol: str) -> int:
+    try:
+        pos = client.get_open_position(symbol)
+    except Exception:
+        return 0
+    try:
+        return int(float(pos.qty))
+    except Exception:
+        return 0
+
+
+def _alpaca_is_tradable(client, symbol: str) -> bool:
+    try:
+        asset = client.get_asset(symbol)
+        return bool(getattr(asset, "tradable", False))
+    except Exception:
+        return False
+
+
+def _alpaca_market_is_open(client) -> bool:
+    try:
+        return bool(client.get_clock().is_open)
+    except Exception:
+        return False
+
+
+def execute_tradesmart_signal_on_alpaca(
+    client,
+    symbol: str,
+    signal: str,
+    *,
+    order_qty: int = 1,
+    allow_short_entries: bool = False,
+) -> dict:
+    """
+    Execute TradeSmart signal on Alpaca.
+
+    Long-only default behavior:
+    - Bullish: open long if flat.
+    - Bearish: close long if open.
+
+    If allow_short_entries=True:
+    - Bearish can also open a short after closing long.
+    """
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+
+    sym = str(symbol).strip().upper()
+    sig = str(signal or "Neutral").strip().title()
+    qty = max(1, int(order_qty))
+
+    result = {
+        "Ticker": sym,
+        "Signal": sig,
+        "Action": "NO_ACTION",
+        "Orders": 0,
+        "Status": "ok",
+        "Note": "",
+    }
+
+    if not _alpaca_is_tradable(client, sym):
+        result["Status"] = "skipped"
+        result["Note"] = "Symbol not tradable in this Alpaca account"
+        return result
+
+    pos_qty = _alpaca_position_qty(client, sym)
+
+    def _submit(side, q):
+        req = MarketOrderRequest(symbol=sym, qty=int(q), side=side, time_in_force=TimeInForce.DAY)
+        client.submit_order(order_data=req)
+        result["Orders"] += 1
+
+    try:
+        if sig == "Bullish":
+            if pos_qty < 0:
+                _submit(OrderSide.BUY, abs(pos_qty))
+                pos_qty = 0
+            if pos_qty == 0:
+                _submit(OrderSide.BUY, qty)
+                result["Action"] = "BUY"
+                result["Note"] = "Opened long from bullish signal"
+            else:
+                result["Action"] = "HOLD_LONG"
+                result["Note"] = "Already long"
+
+        elif sig == "Bearish":
+            if pos_qty > 0:
+                _submit(OrderSide.SELL, pos_qty)
+                pos_qty = 0
+                result["Action"] = "CLOSE_LONG"
+                result["Note"] = "Closed long from bearish signal"
+            if allow_short_entries and pos_qty == 0:
+                _submit(OrderSide.SELL, qty)
+                result["Action"] = "OPEN_SHORT"
+                result["Note"] = "Opened short from bearish signal"
+            elif result["Action"] == "NO_ACTION":
+                result["Action"] = "HOLD_FLAT"
+                result["Note"] = "No long position to close"
+
+        else:
+            result["Action"] = "HOLD"
+            result["Note"] = "Neutral signal"
+
+        if not _alpaca_market_is_open(client):
+            result["Note"] = (result["Note"] + " | Market closed: DAY order may queue").strip()
+
+        return result
+    except Exception as exc:
+        result["Status"] = "error"
+        result["Note"] = str(exc)
+        return result
 
 
 def _rsi_series_from_close(close: pd.Series, period: int = 14) -> pd.Series | None:
