@@ -165,6 +165,90 @@ Behavior:
   - Unrealized P/L below your loss threshold
   - Unrealized P/L drops from its session peak by at least your drawdown threshold
 
+## Nasdaq Strategy Optimization For Alpaca
+
+Use the optimizer script to tune TradeSmart-like parameters on a Nasdaq stock that is tradable in Alpaca.
+
+Script location:
+
+- `import files/optimize_nasdaq_for_alpaca.py`
+
+What it does:
+
+- Verifies the symbol is tradable in your Alpaca account (`paper` or `live` mode)
+- Pulls historical bars (default: `1h`, `730d`)
+- Runs a parameter grid search for EMA/CMF/MACD/Supertrend
+- Selects best parameters on train split and reports out-of-sample test metrics
+- Computes companion strategy signals (MA, RSI, MACD)
+- Optionally executes a trade using a vote threshold across:
+  - optimizer signal
+  - MA signal
+  - RSI signal
+  - MACD signal
+- Supports market-open gating:
+  - Skip run when market is closed (default)
+  - Wait until market opens and run immediately (`--wait-for-open`)
+  - Bypass gate and run even when closed (`--allow-when-closed`)
+
+Run example (default Nasdaq symbol `NVDA`):
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper
+```
+
+Try another Nasdaq symbol:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol AAPL --mode paper --interval 1h --period 730d
+```
+
+Run with execution enabled and signal-vote threshold:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --order-qty 1 --min-aligned-signals 2
+```
+
+Allow short entries on bearish signals:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --allow-short-entries
+```
+
+Wait until next market open and run immediately:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --wait-for-open
+```
+
+Run even when market is closed:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --allow-when-closed
+```
+
+### CLI menu option
+
+From `python cli_app.py`, choose:
+
+- `9. Nasdaq Strategy Optimization (Alpaca)`
+
+Behavior in option 9:
+
+- Preset symbol menu (`NVDA`, `AAPL`, `MSFT`, `AMZN`, `GOOGL`, `META`, `TSLA`, `QQQ`) plus `CUSTOM`
+- Prompts for mode, interval, period, min trades, and cost bps
+- Optional live/paper trade execution prompt
+- Optional short-entry enable prompt
+- Prompt for minimum aligned signals to trade
+- Prompt for auto-rerun every N minutes (`0` disables rerun)
+- Prompt to wait for market open when closed
+- Stays in optimizer flow until you explicitly type `BACK`
+- If auto-rerun is enabled, runs repeatedly and can be stopped with `Ctrl+C`
+
+Important:
+
+- Results are educational backtests, not guaranteed future returns.
+- Always validate out-of-sample metrics and paper trade before live execution.
+
 ## Selection 8 Strategy Trading (Streamlit)
 
 In the Streamlit app, go to:

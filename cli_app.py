@@ -5,6 +5,7 @@ Run: python cli_app.py
 import os
 import sys
 import subprocess
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -600,6 +601,122 @@ def _alpaca_trading_menu(df):
             return
 
 
+def _alpaca_optimizer_menu():
+    print("\nNasdaq strategy optimization (Alpaca)")
+    print("Runs optimization, then can execute the latest optimized signal as a real/paper Alpaca trade.")
+
+    script_path = Path(__file__).resolve().parent / "import files" / "optimize_nasdaq_for_alpaca.py"
+    if not script_path.exists():
+        print(f"Optimizer script not found: {script_path}")
+        _prompt("Press Enter to return to main menu")
+        return
+
+    while True:
+        presets = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ", "CUSTOM"]
+        print("\nPreset symbols")
+        for i, p in enumerate(presets, start=1):
+            print(f"  {i}. {p}")
+        preset_choice = _prompt_int("Choose preset number", 1)
+        if 1 <= preset_choice <= len(presets):
+            picked = presets[preset_choice - 1]
+        else:
+            picked = "NVDA"
+
+        if picked == "CUSTOM":
+            symbol = (_prompt("Ticker symbol", "NVDA") or "NVDA").strip().upper()
+        else:
+            symbol = picked
+            print(f"Using preset symbol: {symbol}")
+
+        mode = (_prompt("Alpaca mode (paper/live)", "paper") or "paper").strip().lower()
+        if mode not in {"paper", "live"}:
+            mode = "paper"
+        interval = (_prompt("Bar interval", "1h") or "1h").strip()
+        period = (_prompt("History period", "730d") or "730d").strip()
+        min_trades = _prompt_int("Minimum train trades", 6)
+        cost_bps = _prompt_float("Trading cost (bps)", 2.0)
+
+        do_execute = (_prompt("Execute optimized signal on Alpaca? (y/n)", "y") or "y").strip().lower() == "y"
+        order_qty = 1
+        allow_short = False
+        min_aligned = 2
+        if do_execute:
+            order_qty = max(1, _prompt_int("Order quantity", 1))
+            allow_short = ((_prompt("Allow short entries on bearish signal? (y/n)", "n") or "n").strip().lower() == "y")
+            min_aligned = max(1, _prompt_int("Minimum aligned signals to trade (optimizer+MA+RSI+MACD)", 2))
+
+        rerun_minutes = _prompt_float("Auto-rerun every N minutes (0 = no auto-rerun)", 0.0)
+        if rerun_minutes < 0:
+            rerun_minutes = 0.0
+        wait_for_open = ((_prompt("If market is closed, wait and run at market open? (y/n)", "y") or "y").strip().lower() == "y")
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--symbol",
+            symbol,
+            "--mode",
+            mode,
+            "--interval",
+            interval,
+            "--period",
+            period,
+            "--min-trades",
+            str(max(0, int(min_trades))),
+            "--cost-bps",
+            str(max(0.0, float(cost_bps))),
+        ]
+
+        if do_execute:
+            cmd.extend([
+                "--execute-trade",
+                "--order-qty",
+                str(order_qty),
+                "--min-aligned-signals",
+                str(min_aligned),
+            ])
+            if allow_short:
+                cmd.append("--allow-short-entries")
+        if wait_for_open:
+            cmd.append("--wait-for-open")
+
+        while True:
+            print("\nRunning optimizer...")
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"Optimizer failed (exit code {exc.returncode}).")
+            except Exception as exc:
+                print(f"Could not run optimizer: {exc}")
+
+            if rerun_minutes <= 0:
+                follow_up = (
+                    _prompt("Type BACK to return to main menu, press Enter to run optimizer again, or NEW to change settings", "")
+                    or ""
+                ).strip().upper()
+                if follow_up == "BACK":
+                    return
+                if follow_up == "NEW":
+                    break
+                continue
+
+            print(
+                f"Auto-rerun enabled: next run in {rerun_minutes:.2f} minute(s). "
+                "Press Ctrl+C to stop auto-rerun."
+            )
+            try:
+                time.sleep(max(1.0, rerun_minutes * 60.0))
+            except KeyboardInterrupt:
+                print("\nAuto-rerun stopped.")
+                follow_up = (
+                    _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                    or ""
+                ).strip().upper()
+                if follow_up == "BACK":
+                    return
+                break
+
+
 def main():
     print("Stock Analysis CLI")
     df = None
@@ -620,7 +737,8 @@ def main():
         print("  6. AI Recommendations")
         print("  7. Investment Possibilities")
         print("  8. Alpaca Trading Bot")
-        print("  9. Exit")
+        print("  9. Nasdaq Strategy Optimization (Alpaca)")
+        print(" 10. Exit")
         choice = _prompt("Select option")
 
         if choice == "1":
@@ -642,6 +760,8 @@ def main():
         elif choice == "8":
             _alpaca_trading_menu(df)
         elif choice == "9":
+            _alpaca_optimizer_menu()
+        elif choice == "10":
             print("Goodbye.")
             break
         else:
