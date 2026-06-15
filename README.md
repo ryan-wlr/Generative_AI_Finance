@@ -178,6 +178,7 @@ What it does:
 - Verifies the symbol is tradable in your Alpaca account (`paper` or `live` mode)
 - Pulls historical bars (default: `1h`, `730d`)
 - Runs a parameter grid search for EMA/CMF/MACD/Supertrend
+- Optimizer type: brute-force grid search (parameter sweep), not a neural-network optimizer like Adam/SGD
 - Selects best parameters on train split and reports out-of-sample test metrics
 - Computes companion strategy signals (MA, RSI, MACD)
 - Optionally executes a trade using a vote threshold across:
