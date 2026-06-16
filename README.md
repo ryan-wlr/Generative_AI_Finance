@@ -188,6 +188,10 @@ What it does:
   - MA signal
   - RSI signal
   - MACD signal
+- Optional post-trade risk monitoring:
+  - closes open position when unrealized P/L drops below your configured threshold
+  - configurable risk-check interval (seconds)
+  - optional force-close near end of trading day
 - Supports market-open gating:
   - Skip run when market is closed (default)
   - Wait until market opens and run immediately (`--wait-for-open`)

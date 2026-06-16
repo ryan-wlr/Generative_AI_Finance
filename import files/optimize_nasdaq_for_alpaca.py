@@ -390,6 +390,178 @@ def _wait_until_market_open(client) -> None:
             time.sleep(60)
 
 
+def _alpaca_position_qty(client, symbol: str) -> int:
+    try:
+        pos = client.get_open_position(symbol)
+    except Exception:
+        return 0
+    try:
+        return int(float(pos.qty))
+    except Exception:
+        return 0
+
+
+def _close_open_position_market(client, symbol: str) -> bool:
+    """Close an open long/short position by market order. Returns True if close was submitted."""
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest
+
+    qty = _alpaca_position_qty(client, symbol)
+    if qty == 0:
+        return False
+
+    if qty > 0:
+        side = OrderSide.SELL
+        order_qty = qty
+    else:
+        side = OrderSide.BUY
+        order_qty = abs(qty)
+
+    req = MarketOrderRequest(symbol=symbol, qty=int(order_qty), side=side, time_in_force=TimeInForce.DAY)
+    client.submit_order(order_data=req)
+    return True
+
+
+def _wait_until_eod_close_window(client, eod_close_minutes: int) -> None:
+    """Block until we are inside the EOD close window, or market closes."""
+    close_minutes = max(0, int(eod_close_minutes))
+    while True:
+        clock = client.get_clock()
+        if not bool(getattr(clock, "is_open", False)):
+            print("Market is closed before EOD close window check. Continuing with close attempt.")
+            return
+
+        next_close = getattr(clock, "next_close", None)
+        now = getattr(clock, "timestamp", None)
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if next_close is None:
+            print("Could not read next close time. Continuing with immediate close attempt.")
+            return
+
+        seconds_to_close = max(0.0, (next_close - now).total_seconds())
+        minutes_to_close = seconds_to_close / 60.0
+        if minutes_to_close <= close_minutes:
+            print(
+                f"EOD close window reached (<= {close_minutes}m to close). Preparing forced close..."
+            )
+            return
+
+        sleep_seconds = min(60.0, max(5.0, seconds_to_close - (close_minutes * 60.0)))
+        print(
+            f"Waiting for EOD close window: {minutes_to_close:.1f}m to close; "
+            f"sleeping {sleep_seconds:.0f}s..."
+        )
+        time.sleep(sleep_seconds)
+
+
+def _force_close_symbol_eod(client, symbol: str, eod_close_minutes: int, max_attempts: int = 2) -> None:
+    """Best-effort EOD close for one symbol with a small retry budget."""
+    _wait_until_eod_close_window(client, eod_close_minutes)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            qty = _alpaca_position_qty(client, symbol)
+            if qty == 0:
+                print(f"EOD close: no open position for {symbol}.")
+                return
+            print(f"EOD close attempt {attempt}/{max_attempts}: closing {symbol} qty={qty}")
+            submitted = _close_open_position_market(client, symbol)
+            if submitted:
+                print("EOD close order submitted.")
+            time.sleep(2)
+        except Exception as exc:
+            print(f"EOD close attempt {attempt}/{max_attempts} failed: {exc}")
+
+    remaining = _alpaca_position_qty(client, symbol)
+    if remaining != 0:
+        print(f"Warning: position still open after EOD close attempts for {symbol} (qty={remaining}).")
+
+
+def _get_unrealized_pl(client, symbol: str) -> float | None:
+    try:
+        pos = client.get_open_position(symbol)
+    except Exception:
+        return None
+    raw = getattr(pos, "unrealized_pl", None)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _monitor_position_loss_and_eod(
+    client,
+    symbol: str,
+    *,
+    loss_close_threshold: float,
+    risk_check_seconds: int,
+    force_close_eod: bool,
+    eod_close_minutes: int,
+) -> None:
+    """Monitor open position and close on loss threshold or at EOD window."""
+    check_seconds = max(5, int(risk_check_seconds))
+    print(
+        "\nRisk monitoring started: "
+        f"loss threshold={loss_close_threshold:.2f}, "
+        f"check interval={check_seconds}s, "
+        f"EOD close={'on' if force_close_eod else 'off'}"
+    )
+
+    while True:
+        qty = _alpaca_position_qty(client, symbol)
+        if qty == 0:
+            print("Risk monitoring finished: no open position.")
+            return
+
+        clock = client.get_clock()
+        is_open = bool(getattr(clock, "is_open", False))
+        if not is_open:
+            print("Market closed while position is still open. Exiting risk monitor.")
+            return
+
+        next_close = getattr(clock, "next_close", None)
+        now = getattr(clock, "timestamp", None)
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        minutes_to_close = None
+        if next_close is not None:
+            minutes_to_close = max(0.0, (next_close - now).total_seconds()) / 60.0
+
+        if force_close_eod and minutes_to_close is not None and minutes_to_close <= max(0, int(eod_close_minutes)):
+            print(
+                f"EOD close window reached while monitoring ({minutes_to_close:.1f}m to close). "
+                "Force-closing open position."
+            )
+            _force_close_symbol_eod(client, symbol, max(0, int(eod_close_minutes)), max_attempts=2)
+            return
+
+        unrealized_pl = _get_unrealized_pl(client, symbol)
+        if unrealized_pl is not None and unrealized_pl < float(loss_close_threshold):
+            print(
+                f"Loss threshold breached for {symbol}: unrealized P/L {unrealized_pl:.2f} "
+                f"< {float(loss_close_threshold):.2f}. Closing position now."
+            )
+            try:
+                _close_open_position_market(client, symbol)
+            except Exception as exc:
+                print(f"Loss-close order failed: {exc}")
+            time.sleep(2)
+            if _alpaca_position_qty(client, symbol) == 0:
+                print("Loss-close successful.")
+                return
+
+        if minutes_to_close is not None and force_close_eod:
+            seconds_until_eod_window = max(0.0, (minutes_to_close - max(0, int(eod_close_minutes))) * 60.0)
+            sleep_seconds = min(float(check_seconds), seconds_until_eod_window if seconds_until_eod_window > 0 else 5.0)
+        else:
+            sleep_seconds = float(check_seconds)
+
+        time.sleep(max(1.0, sleep_seconds))
+
+
 def run_optimization(
     symbol: str,
     interval: str,
@@ -534,6 +706,10 @@ def execute_optimized_signal(
     min_aligned_signals: int,
     order_qty: int,
     allow_short_entries: bool,
+    loss_close_threshold: float,
+    risk_check_seconds: int,
+    force_close_eod: bool,
+    eod_close_minutes: int,
     client=None,
 ) -> None:
     final_signal, agg = _aggregate_signal(signal, companion, min_aligned_signals)
@@ -557,6 +733,27 @@ def execute_optimized_signal(
     for k in ["Ticker", "Signal", "Action", "Orders", "Status", "Note"]:
         print(f"  {k}: {res.get(k)}")
 
+    _monitor_position_loss_and_eod(
+        client,
+        symbol=symbol,
+        loss_close_threshold=float(loss_close_threshold),
+        risk_check_seconds=max(5, int(risk_check_seconds)),
+        force_close_eod=bool(force_close_eod),
+        eod_close_minutes=max(0, int(eod_close_minutes)),
+    )
+
+    if force_close_eod and _alpaca_position_qty(client, symbol) != 0:
+        print(
+            f"\nEOD force-close enabled for {symbol}. "
+            f"Will close open position {max(0, int(eod_close_minutes))} minute(s) before market close."
+        )
+        _force_close_symbol_eod(
+            client,
+            symbol=symbol,
+            eod_close_minutes=max(0, int(eod_close_minutes)),
+            max_attempts=2,
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize a TradeSmart-like strategy for an Alpaca-tradable Nasdaq stock.")
@@ -568,6 +765,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cost-bps", type=float, default=2.0, help="Round-turn trading cost per position change in bps")
     parser.add_argument("--execute-trade", action="store_true", help="Execute latest optimized signal on Alpaca")
     parser.add_argument("--order-qty", type=int, default=1, help="Order quantity when --execute-trade is used")
+    parser.add_argument(
+        "--loss-close-threshold",
+        type=float,
+        default=0.0,
+        help="Close open position when unrealized P/L drops below this amount (default: 0.0)",
+    )
+    parser.add_argument(
+        "--risk-check-seconds",
+        type=int,
+        default=15,
+        help="Seconds between unrealized P/L checks while monitoring an open position (default: 15)",
+    )
+    parser.add_argument(
+        "--force-close-eod",
+        action="store_true",
+        help="After executing trade, wait for end-of-day window and force-close any open position",
+    )
+    parser.add_argument(
+        "--eod-close-minutes",
+        type=int,
+        default=10,
+        help="Minutes before market close to force-close when --force-close-eod is enabled",
+    )
     parser.add_argument(
         "--min-aligned-signals",
         type=int,
@@ -621,6 +841,10 @@ def main() -> None:
             min_aligned_signals=max(1, int(args.min_aligned_signals)),
             order_qty=max(1, int(args.order_qty)),
             allow_short_entries=bool(args.allow_short_entries),
+            loss_close_threshold=float(args.loss_close_threshold),
+            risk_check_seconds=max(5, int(args.risk_check_seconds)),
+            force_close_eod=bool(args.force_close_eod),
+            eod_close_minutes=max(0, int(args.eod_close_minutes)),
             client=result.get("client"),
         )
 

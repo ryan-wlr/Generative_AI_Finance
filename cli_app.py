@@ -640,10 +640,22 @@ def _alpaca_optimizer_menu():
         order_qty = 1
         allow_short = False
         min_aligned = 2
+        loss_close_threshold = 0.0
+        risk_check_seconds = 15
+        force_close_eod = False
+        eod_close_minutes = 10
         if do_execute:
             order_qty = max(1, _prompt_int("Order quantity", 1))
             allow_short = ((_prompt("Allow short entries on bearish signal? (y/n)", "n") or "n").strip().lower() == "y")
             min_aligned = max(1, _prompt_int("Minimum aligned signals to trade (optimizer+MA+RSI+MACD)", 2))
+            loss_close_threshold = _prompt_float(
+                "Close open position when unrealized P/L drops below (default 0 = any loss)",
+                0.0,
+            )
+            risk_check_seconds = max(5, _prompt_int("Risk check interval in seconds", 15))
+            force_close_eod = ((_prompt("Force-close open position near end of day? (y/n)", "y") or "y").strip().lower() == "y")
+            if force_close_eod:
+                eod_close_minutes = max(0, _prompt_int("Force-close how many minutes before market close", 10))
 
         rerun_minutes = _prompt_float("Auto-rerun every N minutes (0 = no auto-rerun)", 0.0)
         if rerun_minutes < 0:
@@ -674,9 +686,19 @@ def _alpaca_optimizer_menu():
                 str(order_qty),
                 "--min-aligned-signals",
                 str(min_aligned),
+                "--loss-close-threshold",
+                str(float(loss_close_threshold)),
+                "--risk-check-seconds",
+                str(max(5, int(risk_check_seconds))),
             ])
             if allow_short:
                 cmd.append("--allow-short-entries")
+            if force_close_eod:
+                cmd.extend([
+                    "--force-close-eod",
+                    "--eod-close-minutes",
+                    str(max(0, int(eod_close_minutes))),
+                ])
         if wait_for_open:
             cmd.append("--wait-for-open")
 
