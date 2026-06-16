@@ -235,6 +235,46 @@ def close_position(client: TradingClient, symbol: str, position_qty: int, log_fi
         place_market_order(client, symbol, OrderSide.BUY, abs(position_qty), log_file=log_file)
 
 
+def force_close_positions_for_symbols(
+    client: TradingClient,
+    symbols: list[str],
+    log_file: Path | None = None,
+    max_attempts: int = 2,
+) -> None:
+    """Best-effort close for all provided symbols; retries failures per symbol."""
+    remaining = [s for s in symbols if str(s).strip()]
+    for attempt in range(1, max_attempts + 1):
+        if not remaining:
+            return
+
+        still_open: list[str] = []
+        for symbol in remaining:
+            try:
+                position_qty = get_position_qty(client, symbol)
+                if position_qty == 0:
+                    continue
+
+                bot_log(
+                    f"- {symbol}: end-of-day close for qty {position_qty} (attempt {attempt}/{max_attempts})",
+                    log_file,
+                )
+                close_position(client, symbol, position_qty, log_file=log_file)
+                still_open.append(symbol)
+            except Exception as exc:
+                bot_log(f"- {symbol}: end-of-day close failed on attempt {attempt}: {exc}", log_file)
+                still_open.append(symbol)
+
+        remaining = still_open
+        if remaining and attempt < max_attempts:
+            time.sleep(2)
+
+    if remaining:
+        bot_log(
+            "End-of-day close completed with unresolved symbols: " + ", ".join(remaining),
+            log_file,
+        )
+
+
 def sleep_until_market_open(client: TradingClient, log_file: Path | None = None) -> None:
     while True:
         clock = client.get_clock()
@@ -345,12 +385,9 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
                     "Force-closing all open portfolio positions.",
                     log_file,
                 )
+                force_close_positions_for_symbols(client, symbols, log_file=log_file, max_attempts=2)
                 for symbol in symbols:
-                    position_qty = get_position_qty(client, symbol)
-                    if position_qty != 0:
-                        bot_log(f"- {symbol}: end-of-day close for qty {position_qty}", log_file)
-                        close_position(client, symbol, position_qty, log_file=log_file)
-                        peak_unrealized_by_symbol.pop(symbol, None)
+                    peak_unrealized_by_symbol.pop(symbol, None)
 
                 sleep_until_market_open(client, log_file=log_file)
                 continue
@@ -408,7 +445,15 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
                     close_position(client, symbol, position_qty, log_file=log_file)
                     peak_unrealized_by_symbol.pop(symbol, None)
 
-            time.sleep(open_interval_seconds)
+            # Do not oversleep past the EOD close window.
+            seconds_until_eod_window = max(0.0, seconds_to_close - (eod_close_minutes * 60.0))
+            if seconds_until_eod_window > 0:
+                sleep_seconds = min(float(open_interval_seconds), seconds_until_eod_window)
+            else:
+                sleep_seconds = min(float(open_interval_seconds), 5.0)
+
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
 
         except KeyboardInterrupt:
             cmd = input("\nBot interrupt detected. Type EXIT to stop bot, or press Enter to continue: ").strip().upper()

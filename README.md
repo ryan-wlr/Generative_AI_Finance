@@ -161,6 +161,8 @@ Behavior:
   - `Caution/No action` -> `CLOSE` (if position exists)
 - Checks market clock and only trades when open
 - Prints sleep/wake status and time until next market open when closed
+- Caps scan sleep so it does not oversleep past the end-of-day close window
+- End-of-day close is best-effort with per-symbol retries so one API/order error does not skip other symbols
 - Exits open positions early when risk rules are breached:
   - Unrealized P/L below your loss threshold
   - Unrealized P/L drops from its session peak by at least your drawdown threshold
