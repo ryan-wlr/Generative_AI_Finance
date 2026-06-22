@@ -169,7 +169,7 @@ Behavior:
 
 ## Nasdaq Strategy Optimization For Alpaca
 
-Use the optimizer script to tune TradeSmart-like parameters on a Nasdaq stock that is tradable in Alpaca.
+Use the optimizer script to tune TradeSmart-like parameters on one or many Alpaca-tradable symbols.
 
 Script location:
 
@@ -188,6 +188,11 @@ What it does:
   - MA signal
   - RSI signal
   - MACD signal
+- Adds a pre-buy quality gate for bullish entries, combining:
+  - max trailing P/E threshold
+  - max annualized volatility threshold
+  - minimum bullish companion votes (MA/RSI/MACD)
+- If bullish quality checks fail, execution is downgraded to `Neutral` (no buy order)
 - Optional post-trade risk monitoring:
   - closes open position when unrealized P/L drops below your configured threshold
   - configurable risk-check interval (seconds)
@@ -233,6 +238,12 @@ Run even when market is closed:
 .\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --allow-when-closed
 ```
 
+Run with explicit bullish quality-gate thresholds:
+
+```powershell
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --max-pe-ratio 40 --max-volatility-pct 55 --min-companion-bull-votes 2
+```
+
 ### CLI menu option
 
 From `python cli_app.py`, choose:
@@ -241,11 +252,25 @@ From `python cli_app.py`, choose:
 
 Behavior in option 9:
 
-- Preset symbol menu (`NVDA`, `AAPL`, `MSFT`, `AMZN`, `GOOGL`, `META`, `TSLA`, `QQQ`) plus `CUSTOM`
+- Symbol source menu:
+  - `1` Tech presets
+  - `2` Curated defense universe
+  - `3` Portfolio tickers from loaded CSV
+  - `4` Custom comma-separated tickers
+  - `10` ALL sources at once (tech + defense + portfolio + optional custom)
+- Deduplicates candidates, then optionally ranks and auto-picks top N symbols for that run
+- Ranking is based on a composite score using:
+  - 3-month momentum
+  - 1-month momentum
+  - Sharpe approximation
+  - dollar-volume liquidity
+  - volatility penalty
+- Executes optimization in batch across selected symbols and prints success/failure summary per run
 - Prompts for mode, interval, period, min trades, and cost bps
 - Optional live/paper trade execution prompt
 - Optional short-entry enable prompt
 - Prompt for minimum aligned signals to trade
+- Prompt for bullish pre-buy quality thresholds (max P/E, max volatility, minimum companion bullish votes)
 - Prompt for auto-rerun every N minutes (`0` disables rerun)
 - Prompt to wait for market open when closed
 - Stays in optimizer flow until you explicitly type `BACK`

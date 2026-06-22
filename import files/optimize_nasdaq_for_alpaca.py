@@ -18,7 +18,13 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from utils import get_alpaca_trading_client, get_history, execute_tradesmart_signal_on_alpaca
+from utils import (
+    get_alpaca_trading_client,
+    get_history,
+    execute_tradesmart_signal_on_alpaca,
+    compute_pe_ratio,
+    compute_volatility_from_price_history,
+)
 
 
 ANNUAL_BARS_1H_US = 252 * 6.5
@@ -332,6 +338,51 @@ def _aggregate_signal(base_signal: str, companion: dict, min_aligned_signals: in
         "threshold": threshold,
     }
     return final_signal, details
+
+
+def _pre_buy_quality_gate(
+    *,
+    symbol: str,
+    price_df: pd.DataFrame,
+    companion: dict,
+    max_pe_ratio: float,
+    max_volatility_pct: float,
+    min_companion_bull_votes: int,
+) -> tuple[bool, dict]:
+    """
+    Final quality gate before opening/adding a long position.
+    Requires valuation/risk checks plus companion strategy confirmation.
+    """
+    details = {
+        "symbol": symbol,
+        "pe": np.nan,
+        "volatility_pct": np.nan,
+        "companion_bull_votes": 0,
+        "max_pe_ratio": float(max_pe_ratio),
+        "max_volatility_pct": float(max_volatility_pct),
+        "min_companion_bull_votes": int(min_companion_bull_votes),
+        "pe_pass": False,
+        "vol_pass": False,
+        "companion_pass": False,
+    }
+
+    pe = compute_pe_ratio(symbol)
+    if pd.notna(pe) and np.isfinite(pe) and float(pe) > 0:
+        details["pe"] = float(pe)
+        details["pe_pass"] = float(pe) <= float(max_pe_ratio)
+
+    vol = compute_volatility_from_price_history(price_df)
+    if vol is not None and np.isfinite(vol):
+        details["volatility_pct"] = float(vol)
+        details["vol_pass"] = float(vol) <= float(max_volatility_pct)
+
+    companion_votes = [companion.get("MA", "Neutral"), companion.get("RSI", "Neutral"), companion.get("MACD", "Neutral")]
+    bulls = sum(1 for v in companion_votes if v == "Bullish")
+    details["companion_bull_votes"] = int(bulls)
+    details["companion_pass"] = int(bulls) >= max(1, int(min_companion_bull_votes))
+
+    passed = bool(details["pe_pass"] and details["vol_pass"] and details["companion_pass"])
+    return passed, details
 
 
 def _verify_alpaca_symbol(symbol: str, mode: str):
@@ -691,6 +742,7 @@ def run_optimization(
         "symbol": symbol,
         "mode": mode,
         "client": client,
+        "price_data": data,
         "best_params": best_params,
         "latest_signal": latest_signal,
         "companion": companion,
@@ -710,6 +762,10 @@ def execute_optimized_signal(
     risk_check_seconds: int,
     force_close_eod: bool,
     eod_close_minutes: int,
+    price_data: pd.DataFrame | None,
+    max_pe_ratio: float,
+    max_volatility_pct: float,
+    min_companion_bull_votes: int,
     client=None,
 ) -> None:
     final_signal, agg = _aggregate_signal(signal, companion, min_aligned_signals)
@@ -719,6 +775,29 @@ def execute_optimized_signal(
         f"Bull votes={agg['bull_votes']} | Bear votes={agg['bear_votes']} | Threshold={agg['threshold']}"
     )
     print(f"  Final execution signal: {final_signal}")
+
+    # For buy decisions, enforce valuation/risk/legacy-strategy checks before placing order.
+    if final_signal == "Bullish" and price_data is not None and not price_data.empty:
+        gate_ok, gate = _pre_buy_quality_gate(
+            symbol=symbol,
+            price_df=price_data,
+            companion=companion,
+            max_pe_ratio=max_pe_ratio,
+            max_volatility_pct=max_volatility_pct,
+            min_companion_bull_votes=min_companion_bull_votes,
+        )
+        pe_txt = f"{gate['pe']:.2f}" if np.isfinite(gate["pe"]) else "n/a"
+        vol_txt = f"{gate['volatility_pct']:.1f}%" if np.isfinite(gate["volatility_pct"]) else "n/a"
+        print("\nPre-buy quality gate:")
+        print(
+            f"  P/E={pe_txt} (max {gate['max_pe_ratio']:.2f}) -> {'PASS' if gate['pe_pass'] else 'FAIL'} | "
+            f"Volatility={vol_txt} (max {gate['max_volatility_pct']:.1f}%) -> {'PASS' if gate['vol_pass'] else 'FAIL'} | "
+            f"Companion bullish votes={gate['companion_bull_votes']} "
+            f"(min {gate['min_companion_bull_votes']}) -> {'PASS' if gate['companion_pass'] else 'FAIL'}"
+        )
+        if not gate_ok:
+            print("  Buy blocked by quality gate. Downgrading execution signal to Neutral.")
+            final_signal = "Neutral"
 
     if client is None:
         client = get_alpaca_trading_client(mode)
@@ -809,6 +888,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="If market is closed, wait until it opens, then run optimization",
     )
+    parser.add_argument(
+        "--max-pe-ratio",
+        type=float,
+        default=45.0,
+        help="Maximum allowed trailing P/E to permit bullish buy execution (default: 45.0)",
+    )
+    parser.add_argument(
+        "--max-volatility-pct",
+        type=float,
+        default=65.0,
+        help="Maximum allowed annualized volatility %% to permit bullish buy execution (default: 65.0)",
+    )
+    parser.add_argument(
+        "--min-companion-bull-votes",
+        type=int,
+        default=2,
+        help="Minimum bullish votes across companion strategies (MA/RSI/MACD) for bullish buy execution (default: 2)",
+    )
     return parser.parse_args()
 
 
@@ -845,6 +942,10 @@ def main() -> None:
             risk_check_seconds=max(5, int(args.risk_check_seconds)),
             force_close_eod=bool(args.force_close_eod),
             eod_close_minutes=max(0, int(args.eod_close_minutes)),
+            price_data=result.get("price_data"),
+            max_pe_ratio=float(args.max_pe_ratio),
+            max_volatility_pct=float(args.max_volatility_pct),
+            min_companion_bull_votes=max(1, int(args.min_companion_bull_votes)),
             client=result.get("client"),
         )
 

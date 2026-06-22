@@ -56,6 +56,28 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 # Common Yahoo symbol aliases for the idea input
 _IDEA_TICKER_ALIASES = {"ORACLE": "ORCL"}
 
+# Curated large-cap US defense/aerospace universe for themed optimization runs.
+_DEFENSE_UNIVERSE = [
+    "LMT",   # Lockheed Martin
+    "NOC",   # Northrop Grumman
+    "RTX",   # RTX
+    "GD",    # General Dynamics
+    "BA",    # Boeing
+    "LHX",   # L3Harris
+    "HII",   # Huntington Ingalls
+    "TXT",   # Textron
+    "LDOS",  # Leidos
+    "KTOS",  # Kratos
+    "AVAV",  # AeroVironment
+    "MRCY",  # Mercury Systems
+    "CW",    # Curtiss-Wright
+    "BWXT",  # BWX Technologies
+    "OSIS",  # OSI Systems
+    "HEI",   # HEICO
+    "SAIC",  # SAIC
+    "AXON",  # Axon (public safety/defense-adjacent)
+]
+
 REQUIRED_COLUMNS = [
     "Asset",
     "Ticker",
@@ -601,7 +623,7 @@ def _alpaca_trading_menu(df):
             return
 
 
-def _alpaca_optimizer_menu():
+def _alpaca_optimizer_menu(df):
     print("\nNasdaq strategy optimization (Alpaca)")
     print("Runs optimization, then can execute the latest optimized signal as a real/paper Alpaca trade.")
 
@@ -611,22 +633,152 @@ def _alpaca_optimizer_menu():
         _prompt("Press Enter to return to main menu")
         return
 
-    while True:
-        presets = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ", "CUSTOM"]
-        print("\nPreset symbols")
-        for i, p in enumerate(presets, start=1):
-            print(f"  {i}. {p}")
-        preset_choice = _prompt_int("Choose preset number", 1)
-        if 1 <= preset_choice <= len(presets):
-            picked = presets[preset_choice - 1]
-        else:
-            picked = "NVDA"
+    def _unique_clean_symbols(items):
+        seen = set()
+        out = []
+        for raw in items:
+            s = str(raw).strip().upper()
+            if not s:
+                continue
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
 
-        if picked == "CUSTOM":
-            symbol = (_prompt("Ticker symbol", "NVDA") or "NVDA").strip().upper()
+    def _rank_optimizer_candidates(symbols, lookback_period="180d"):
+        rows = []
+        for sym in _unique_clean_symbols(symbols):
+            try:
+                hist, _ = get_history(sym, period=lookback_period, interval="1d")
+            except Exception:
+                hist = None
+            if hist is None or hist.empty or "Close" not in hist.columns:
+                continue
+
+            d = hist.sort_index().copy()
+            close = pd.to_numeric(d["Close"], errors="coerce").dropna()
+            if close.shape[0] < 90:
+                continue
+
+            ret_1d = close.pct_change().dropna()
+            if ret_1d.empty:
+                continue
+
+            ret_3m = float(close.iloc[-1] / close.iloc[max(0, len(close) - 63)] - 1.0)
+            ret_1m = float(close.iloc[-1] / close.iloc[max(0, len(close) - 21)] - 1.0)
+            vol_ann = float(ret_1d.std() * np.sqrt(252))
+            sharpe_approx = float((ret_1d.mean() / ret_1d.std()) * np.sqrt(252)) if ret_1d.std() > 0 else np.nan
+
+            if "Volume" in d.columns:
+                vol = pd.to_numeric(d["Volume"], errors="coerce").fillna(0.0)
+                dollar_vol = float((close.reindex(vol.index).ffill() * vol).tail(20).mean())
+            else:
+                dollar_vol = np.nan
+
+            rows.append(
+                {
+                    "symbol": sym,
+                    "ret_3m": ret_3m,
+                    "ret_1m": ret_1m,
+                    "sharpe": sharpe_approx,
+                    "vol_ann": vol_ann,
+                    "dollar_vol": dollar_vol,
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame()
+
+        rank_df = pd.DataFrame(rows)
+        rank_df = rank_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["ret_3m", "ret_1m", "vol_ann"])
+        if rank_df.empty:
+            return rank_df
+
+        # Composite ranking:
+        # + medium-term momentum (3m)
+        # + short-term momentum (1m)
+        # + Sharpe approximation
+        # + liquidity (dollar volume)
+        # - volatility penalty
+        rank_df["score"] = (
+            0.35 * rank_df["ret_3m"].rank(pct=True)
+            + 0.25 * rank_df["ret_1m"].rank(pct=True)
+            + 0.20 * rank_df["sharpe"].rank(pct=True)
+            + 0.15 * rank_df["dollar_vol"].rank(pct=True)
+            + 0.05 * (1.0 - rank_df["vol_ann"].rank(pct=True))
+        )
+        return rank_df.sort_values("score", ascending=False).reset_index(drop=True)
+
+    while True:
+        tech_presets = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ"]
+        print("\nSymbol source")
+        print("  1. Tech presets (NVDA/AAPL/MSFT/AMZN/GOOGL/META/TSLA/QQQ)")
+        print("  2. Defense stock universe (curated)")
+        print("  3. Portfolio tickers from loaded CSV")
+        print("  4. Custom comma-separated tickers")
+        print(" 10. ALL sources at once (tech + defense + portfolio + optional custom)")
+        source_choice = _prompt_int("Choose source", 1)
+
+        if source_choice == 2:
+            base_symbols = list(_DEFENSE_UNIVERSE)
+            print(f"Using defense universe ({len(base_symbols)} symbols).")
+        elif source_choice == 3:
+            base_symbols = [
+                t
+                for t in df["Ticker"].astype(str).str.strip().unique().tolist()
+                if t and str(t).lower() != "nan"
+            ]
+            if not base_symbols:
+                print("No portfolio tickers available; using tech presets instead.")
+                base_symbols = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ"]
+        elif source_choice == 4:
+            raw = _prompt("Enter tickers (comma-separated)", "NVDA,AAPL,MSFT") or "NVDA,AAPL,MSFT"
+            base_symbols = [s.strip().upper() for s in raw.replace(";", ",").split(",") if s.strip()]
+        elif source_choice == 10:
+            portfolio_symbols = [
+                t
+                for t in df["Ticker"].astype(str).str.strip().unique().tolist()
+                if t and str(t).lower() != "nan"
+            ]
+            custom_raw = (_prompt("Optional custom tickers to include (comma-separated, blank to skip)", "") or "").strip()
+            custom_symbols = [s.strip().upper() for s in custom_raw.replace(";", ",").split(",") if s.strip()]
+            base_symbols = tech_presets + list(_DEFENSE_UNIVERSE) + portfolio_symbols + custom_symbols
+            print(
+                "Using ALL symbol sources: "
+                f"tech={len(tech_presets)}, defense={len(_DEFENSE_UNIVERSE)}, "
+                f"portfolio={len(portfolio_symbols)}, custom={len(custom_symbols)}"
+            )
         else:
-            symbol = picked
-            print(f"Using preset symbol: {symbol}")
+            base_symbols = list(tech_presets)
+
+        base_symbols = _unique_clean_symbols(base_symbols)
+        if not base_symbols:
+            print("No valid symbols selected.")
+            continue
+
+        print(f"Candidate symbols: {', '.join(base_symbols)}")
+
+        use_ranking = ((_prompt("Rank and auto-pick best symbols? (y/n)", "y") or "y").strip().lower() == "y")
+        if use_ranking:
+            top_n = max(1, _prompt_int("How many symbols to optimize this run", 10))
+            rank_df = _rank_optimizer_candidates(base_symbols)
+            if rank_df.empty:
+                print("Ranking failed (insufficient data). Falling back to input order.")
+                symbols = base_symbols[:top_n]
+            else:
+                symbols = rank_df["symbol"].head(top_n).tolist()
+                print("\nTop ranked symbols for optimization:")
+                show_cols = ["symbol", "score", "ret_3m", "ret_1m", "sharpe", "vol_ann", "dollar_vol"]
+                print(rank_df[show_cols].head(top_n).to_string(index=False, float_format=lambda x: f"{x:,.4f}"))
+        else:
+            top_n = max(1, _prompt_int("How many symbols to optimize from this list", min(10, len(base_symbols))))
+            symbols = base_symbols[:top_n]
+
+        if not symbols:
+            print("No symbols selected after filtering.")
+            continue
+
+        print(f"\nWill optimize {len(symbols)} symbol(s): {', '.join(symbols)}")
 
         mode = (_prompt("Alpaca mode (paper/live)", "paper") or "paper").strip().lower()
         if mode not in {"paper", "live"}:
@@ -644,10 +796,16 @@ def _alpaca_optimizer_menu():
         risk_check_seconds = 15
         force_close_eod = False
         eod_close_minutes = 10
+        max_pe_ratio = 45.0
+        max_volatility_pct = 65.0
+        min_companion_bull_votes = 2
         if do_execute:
             order_qty = max(1, _prompt_int("Order quantity", 1))
             allow_short = ((_prompt("Allow short entries on bearish signal? (y/n)", "n") or "n").strip().lower() == "y")
             min_aligned = max(1, _prompt_int("Minimum aligned signals to trade (optimizer+MA+RSI+MACD)", 2))
+            max_pe_ratio = _prompt_float("Max trailing P/E allowed before BUY", 45.0)
+            max_volatility_pct = _prompt_float("Max annualized volatility % allowed before BUY", 65.0)
+            min_companion_bull_votes = max(1, _prompt_int("Min bullish companion votes (MA/RSI/MACD) before BUY", 2))
             loss_close_threshold = _prompt_float(
                 "Close open position when unrealized P/L drops below (default 0 = any loss)",
                 0.0,
@@ -662,11 +820,9 @@ def _alpaca_optimizer_menu():
             rerun_minutes = 0.0
         wait_for_open = ((_prompt("If market is closed, wait and run at market open? (y/n)", "y") or "y").strip().lower() == "y")
 
-        cmd = [
+        cmd_base = [
             sys.executable,
             str(script_path),
-            "--symbol",
-            symbol,
             "--mode",
             mode,
             "--interval",
@@ -680,7 +836,7 @@ def _alpaca_optimizer_menu():
         ]
 
         if do_execute:
-            cmd.extend([
+            cmd_base.extend([
                 "--execute-trade",
                 "--order-qty",
                 str(order_qty),
@@ -690,26 +846,48 @@ def _alpaca_optimizer_menu():
                 str(float(loss_close_threshold)),
                 "--risk-check-seconds",
                 str(max(5, int(risk_check_seconds))),
+                "--max-pe-ratio",
+                str(max(0.0, float(max_pe_ratio))),
+                "--max-volatility-pct",
+                str(max(0.0, float(max_volatility_pct))),
+                "--min-companion-bull-votes",
+                str(max(1, int(min_companion_bull_votes))),
             ])
             if allow_short:
-                cmd.append("--allow-short-entries")
+                cmd_base.append("--allow-short-entries")
             if force_close_eod:
-                cmd.extend([
+                cmd_base.extend([
                     "--force-close-eod",
                     "--eod-close-minutes",
                     str(max(0, int(eod_close_minutes))),
                 ])
         if wait_for_open:
-            cmd.append("--wait-for-open")
+            cmd_base.append("--wait-for-open")
 
         while True:
-            print("\nRunning optimizer...")
-            try:
-                subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError as exc:
-                print(f"Optimizer failed (exit code {exc.returncode}).")
-            except Exception as exc:
-                print(f"Could not run optimizer: {exc}")
+            print("\nRunning optimizer batch...")
+            passed = []
+            failed = []
+            for idx, symbol in enumerate(symbols, start=1):
+                cmd = list(cmd_base) + ["--symbol", symbol]
+                print(f"\n[{idx}/{len(symbols)}] Optimizing {symbol} ...")
+                try:
+                    subprocess.run(cmd, check=True)
+                    passed.append(symbol)
+                except subprocess.CalledProcessError as exc:
+                    print(f"Optimizer failed for {symbol} (exit code {exc.returncode}).")
+                    failed.append(symbol)
+                except Exception as exc:
+                    print(f"Could not run optimizer for {symbol}: {exc}")
+                    failed.append(symbol)
+
+            print("\nBatch summary:")
+            print(f"  Success: {len(passed)}")
+            if passed:
+                print(f"  Symbols succeeded: {', '.join(passed)}")
+            print(f"  Failed: {len(failed)}")
+            if failed:
+                print(f"  Symbols failed: {', '.join(failed)}")
 
             if rerun_minutes <= 0:
                 follow_up = (
@@ -782,7 +960,7 @@ def main():
         elif choice == "8":
             _alpaca_trading_menu(df)
         elif choice == "9":
-            _alpaca_optimizer_menu()
+            _alpaca_optimizer_menu(df)
         elif choice == "10":
             print("Goodbye.")
             break
