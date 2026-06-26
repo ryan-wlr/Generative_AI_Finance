@@ -257,7 +257,7 @@ Behavior in option 9:
   - `2` Curated defense universe
   - `3` Portfolio tickers from loaded CSV
   - `4` Custom comma-separated tickers
-  - `10` ALL sources at once (tech + defense + portfolio + optional custom)
+  - `10` ALL sources at once (`1 + 2 + 3 + optional custom`)
 - Deduplicates candidates, then optionally ranks and auto-picks top N symbols for that run
 - Ranking is based on a composite score using:
   - 3-month momentum
@@ -271,6 +271,11 @@ Behavior in option 9:
 - Optional short-entry enable prompt
 - Prompt for minimum aligned signals to trade
 - Prompt for bullish pre-buy quality thresholds (max P/E, max volatility, minimum companion bullish votes)
+- In source option `10`, strict alignment is enforced automatically for BUY decisions:
+  - optimizer + MA + RSI + MACD must all align bullish
+  - Supertrend, Chandelier Exit, and Trend Filter must all be bullish
+- In source option `10`, end-of-day close is enforced automatically when execution is enabled
+  - you still choose how many minutes before market close to force-close
 - Prompt for auto-rerun every N minutes (`0` disables rerun)
 - Prompt to wait for market open when closed
 - Stays in optimizer flow until you explicitly type `BACK`

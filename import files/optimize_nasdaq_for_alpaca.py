@@ -30,6 +30,19 @@ from utils import (
 ANNUAL_BARS_1H_US = 252 * 6.5
 
 
+def _compute_atr_from_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1.0 / max(1, int(period)), adjust=False, min_periods=max(1, int(period))).mean()
+
+
 def _compute_supertrend_from_ohlc(
     high: pd.Series,
     low: pd.Series,
@@ -348,6 +361,8 @@ def _pre_buy_quality_gate(
     max_pe_ratio: float,
     max_volatility_pct: float,
     min_companion_bull_votes: int,
+    strict_trend_alignment: bool,
+    trend_alignment: dict | None,
 ) -> tuple[bool, dict]:
     """
     Final quality gate before opening/adding a long position.
@@ -364,6 +379,9 @@ def _pre_buy_quality_gate(
         "pe_pass": False,
         "vol_pass": False,
         "companion_pass": False,
+        "strict_trend_alignment": bool(strict_trend_alignment),
+        "trend_alignment": trend_alignment or {},
+        "trend_pass": False,
     }
 
     pe = compute_pe_ratio(symbol)
@@ -381,8 +399,63 @@ def _pre_buy_quality_gate(
     details["companion_bull_votes"] = int(bulls)
     details["companion_pass"] = int(bulls) >= max(1, int(min_companion_bull_votes))
 
-    passed = bool(details["pe_pass"] and details["vol_pass"] and details["companion_pass"])
+    if bool(strict_trend_alignment):
+        details["trend_pass"] = bool((trend_alignment or {}).get("all_bullish", False))
+    else:
+        details["trend_pass"] = True
+
+    passed = bool(details["pe_pass"] and details["vol_pass"] and details["companion_pass"] and details["trend_pass"])
     return passed, details
+
+
+def _latest_trend_alignment_checks(price_df: pd.DataFrame, best_params: dict | None) -> dict:
+    out = {
+        "supertrend_bull": False,
+        "chandelier_bull": False,
+        "trend_filter_bull": False,
+        "all_bullish": False,
+        "trend_filter_name": "Close > EMA200",
+        "chandelier_name": "Close > Chandelier(22, 3.0)",
+    }
+    if price_df is None or price_df.empty:
+        return out
+
+    required = {"High", "Low", "Close"}
+    if not required.issubset(set(price_df.columns)):
+        return out
+
+    close = pd.to_numeric(price_df["Close"], errors="coerce")
+    high = pd.to_numeric(price_df["High"], errors="coerce")
+    low = pd.to_numeric(price_df["Low"], errors="coerce")
+    if close.dropna().empty:
+        return out
+
+    st_period = int((best_params or {}).get("st_atr_period", 10))
+    st_multiplier = float((best_params or {}).get("st_multiplier", 3.0))
+    _, st_bull = _compute_supertrend_from_ohlc(
+        high,
+        low,
+        close,
+        atr_period=max(1, st_period),
+        multiplier=max(0.1, st_multiplier),
+    )
+    if not st_bull.dropna().empty:
+        out["supertrend_bull"] = bool(st_bull.dropna().iloc[-1])
+
+    atr = _compute_atr_from_ohlc(high, low, close, period=22)
+    hh = high.rolling(22, min_periods=22).max()
+    chandelier_long = hh - 3.0 * atr
+    if not close.empty and not chandelier_long.dropna().empty:
+        last_close = float(close.iloc[-1])
+        last_chandelier = float(chandelier_long.dropna().iloc[-1])
+        out["chandelier_bull"] = np.isfinite(last_close) and np.isfinite(last_chandelier) and (last_close > last_chandelier)
+
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    if not ema200.dropna().empty:
+        out["trend_filter_bull"] = bool(float(close.iloc[-1]) > float(ema200.iloc[-1]))
+
+    out["all_bullish"] = bool(out["supertrend_bull"] and out["chandelier_bull"] and out["trend_filter_bull"])
+    return out
 
 
 def _verify_alpaca_symbol(symbol: str, mode: str):
@@ -766,6 +839,8 @@ def execute_optimized_signal(
     max_pe_ratio: float,
     max_volatility_pct: float,
     min_companion_bull_votes: int,
+    best_params: dict | None,
+    strict_trend_alignment: bool,
     client=None,
 ) -> None:
     final_signal, agg = _aggregate_signal(signal, companion, min_aligned_signals)
@@ -778,6 +853,7 @@ def execute_optimized_signal(
 
     # For buy decisions, enforce valuation/risk/legacy-strategy checks before placing order.
     if final_signal == "Bullish" and price_data is not None and not price_data.empty:
+        trend_alignment = _latest_trend_alignment_checks(price_data, best_params)
         gate_ok, gate = _pre_buy_quality_gate(
             symbol=symbol,
             price_df=price_data,
@@ -785,9 +861,17 @@ def execute_optimized_signal(
             max_pe_ratio=max_pe_ratio,
             max_volatility_pct=max_volatility_pct,
             min_companion_bull_votes=min_companion_bull_votes,
+            strict_trend_alignment=bool(strict_trend_alignment),
+            trend_alignment=trend_alignment,
         )
         pe_txt = f"{gate['pe']:.2f}" if np.isfinite(gate["pe"]) else "n/a"
         vol_txt = f"{gate['volatility_pct']:.1f}%" if np.isfinite(gate["volatility_pct"]) else "n/a"
+        trend = gate.get("trend_alignment", {})
+        trend_txt = (
+            f"Supertrend={'PASS' if trend.get('supertrend_bull', False) else 'FAIL'} | "
+            f"Chandelier={'PASS' if trend.get('chandelier_bull', False) else 'FAIL'} | "
+            f"TrendFilter={'PASS' if trend.get('trend_filter_bull', False) else 'FAIL'}"
+        )
         print("\nPre-buy quality gate:")
         print(
             f"  P/E={pe_txt} (max {gate['max_pe_ratio']:.2f}) -> {'PASS' if gate['pe_pass'] else 'FAIL'} | "
@@ -795,6 +879,8 @@ def execute_optimized_signal(
             f"Companion bullish votes={gate['companion_bull_votes']} "
             f"(min {gate['min_companion_bull_votes']}) -> {'PASS' if gate['companion_pass'] else 'FAIL'}"
         )
+        if bool(gate.get("strict_trend_alignment", False)):
+            print(f"  Strict trend alignment -> {trend_txt}")
         if not gate_ok:
             print("  Buy blocked by quality gate. Downgrading execution signal to Neutral.")
             final_signal = "Neutral"
@@ -906,6 +992,11 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Minimum bullish votes across companion strategies (MA/RSI/MACD) for bullish buy execution (default: 2)",
     )
+    parser.add_argument(
+        "--strict-trend-alignment",
+        action="store_true",
+        help="Require Supertrend + Chandelier Exit + Trend Filter to all be bullish before any BUY execution",
+    )
     return parser.parse_args()
 
 
@@ -946,6 +1037,8 @@ def main() -> None:
             max_pe_ratio=float(args.max_pe_ratio),
             max_volatility_pct=float(args.max_volatility_pct),
             min_companion_bull_votes=max(1, int(args.min_companion_bull_votes)),
+            best_params=result.get("best_params"),
+            strict_trend_alignment=bool(args.strict_trend_alignment),
             client=result.get("client"),
         )
 

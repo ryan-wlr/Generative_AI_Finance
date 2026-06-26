@@ -716,7 +716,7 @@ def _alpaca_optimizer_menu(df):
         print("  2. Defense stock universe (curated)")
         print("  3. Portfolio tickers from loaded CSV")
         print("  4. Custom comma-separated tickers")
-        print(" 10. ALL sources at once (tech + defense + portfolio + optional custom)")
+        print(" 10. ALL sources at once (1 + 2 + 3 + optional 4 custom)")
         source_choice = _prompt_int("Choose source", 1)
 
         if source_choice == 2:
@@ -792,6 +792,7 @@ def _alpaca_optimizer_menu(df):
         order_qty = 1
         allow_short = False
         min_aligned = 2
+        strict_trend_alignment = False
         loss_close_threshold = 0.0
         risk_check_seconds = 15
         force_close_eod = False
@@ -806,14 +807,31 @@ def _alpaca_optimizer_menu(df):
             max_pe_ratio = _prompt_float("Max trailing P/E allowed before BUY", 45.0)
             max_volatility_pct = _prompt_float("Max annualized volatility % allowed before BUY", 65.0)
             min_companion_bull_votes = max(1, _prompt_int("Min bullish companion votes (MA/RSI/MACD) before BUY", 2))
+
+            if source_choice == 10:
+                # Option 10 is the strict "run everything" mode.
+                strict_trend_alignment = True
+                min_aligned = max(4, int(min_aligned))
+                min_companion_bull_votes = max(3, int(min_companion_bull_votes))
+                print(
+                    "Strict alignment enabled for option 10: "
+                    "BUY requires optimizer+MA+RSI+MACD all bullish plus "
+                    "Supertrend+Chandelier+Trend Filter bullish."
+                )
+
             loss_close_threshold = _prompt_float(
                 "Close open position when unrealized P/L drops below (default 0 = any loss)",
                 0.0,
             )
             risk_check_seconds = max(5, _prompt_int("Risk check interval in seconds", 15))
-            force_close_eod = ((_prompt("Force-close open position near end of day? (y/n)", "y") or "y").strip().lower() == "y")
-            if force_close_eod:
+            if source_choice == 10:
+                force_close_eod = True
+                print("Option 10 enforces end-of-day position close.")
                 eod_close_minutes = max(0, _prompt_int("Force-close how many minutes before market close", 10))
+            else:
+                force_close_eod = ((_prompt("Force-close open position near end of day? (y/n)", "y") or "y").strip().lower() == "y")
+                if force_close_eod:
+                    eod_close_minutes = max(0, _prompt_int("Force-close how many minutes before market close", 10))
 
         rerun_minutes = _prompt_float("Auto-rerun every N minutes (0 = no auto-rerun)", 0.0)
         if rerun_minutes < 0:
@@ -855,6 +873,8 @@ def _alpaca_optimizer_menu(df):
             ])
             if allow_short:
                 cmd_base.append("--allow-short-entries")
+            if strict_trend_alignment:
+                cmd_base.append("--strict-trend-alignment")
             if force_close_eod:
                 cmd_base.extend([
                     "--force-close-eod",
