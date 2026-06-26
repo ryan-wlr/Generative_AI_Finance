@@ -52,6 +52,7 @@ from utils import (
 )
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / "import files" / ".env", override=False)
 
 # Common Yahoo symbol aliases for the idea input
 _IDEA_TICKER_ALIASES = {"ORACLE": "ORCL"}
@@ -113,6 +114,16 @@ def _prompt_int(msg, default=None):
             return int(val)
         except (TypeError, ValueError):
             print("Invalid number. Try again.")
+
+
+def _alpaca_creds_present(mode: str) -> tuple[bool, list[str]]:
+    mode = (mode or "paper").strip().lower()
+    if mode == "live":
+        required = ["ALPACA_LIVE_API_KEY", "ALPACA_LIVE_API_SECRET", "ALPACA_LIVE_BASE_URL"]
+    else:
+        required = ["ALPACA_PAPER_API_KEY", "ALPACA_PAPER_API_SECRET", "ALPACA_PAPER_BASE_URL"]
+    missing = [k for k in required if not os.getenv(k)]
+    return len(missing) == 0, missing
 
 
 def _ensure_columns(df):
@@ -894,6 +905,65 @@ def _alpaca_optimizer_menu(df):
             cmd_base.append("--wait-for-open")
 
         while True:
+            creds_ok, missing_keys = _alpaca_creds_present(mode)
+            if not creds_ok:
+                print(
+                    "\nSkipping optimizer batch before run because Alpaca credentials are missing for "
+                    f"mode='{mode}': {', '.join(missing_keys)}"
+                )
+                if rerun_minutes <= 0:
+                    if continuous_mode:
+                        rerun_minutes = 5.0
+                        print("Continuous mode active: sleeping 5.00 minute(s) before retry.")
+                        try:
+                            time.sleep(300)
+                        except KeyboardInterrupt:
+                            print("\nAuto-rerun stopped.")
+                            try:
+                                follow_up = (
+                                    _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                                    or ""
+                                ).strip().upper()
+                            except KeyboardInterrupt:
+                                print("Returning to main menu.")
+                                return
+                            if follow_up == "BACK":
+                                return
+                            break
+                        continue
+
+                    follow_up = (
+                        _prompt(
+                            "Credentials missing. Type BACK to return to main menu, or press Enter to retry",
+                            "",
+                        )
+                        or ""
+                    ).strip().upper()
+                    if follow_up == "BACK":
+                        return
+                    continue
+
+                print(
+                    f"Auto-rerun enabled: next credential check in {rerun_minutes:.2f} minute(s). "
+                    "Press Ctrl+C to stop auto-rerun."
+                )
+                try:
+                    time.sleep(max(1.0, rerun_minutes * 60.0))
+                except KeyboardInterrupt:
+                    print("\nAuto-rerun stopped.")
+                    try:
+                        follow_up = (
+                            _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                            or ""
+                        ).strip().upper()
+                    except KeyboardInterrupt:
+                        print("Returning to main menu.")
+                        return
+                    if follow_up == "BACK":
+                        return
+                    break
+                continue
+
             print("\nRunning optimizer batch...")
             passed = []
             failed = []
@@ -926,10 +996,14 @@ def _alpaca_optimizer_menu(df):
                         time.sleep(300)
                     except KeyboardInterrupt:
                         print("\nAuto-rerun stopped.")
-                        follow_up = (
-                            _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
-                            or ""
-                        ).strip().upper()
+                        try:
+                            follow_up = (
+                                _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                                or ""
+                            ).strip().upper()
+                        except KeyboardInterrupt:
+                            print("Returning to main menu.")
+                            return
                         if follow_up == "BACK":
                             return
                         break
@@ -952,10 +1026,14 @@ def _alpaca_optimizer_menu(df):
                 time.sleep(max(1.0, rerun_minutes * 60.0))
             except KeyboardInterrupt:
                 print("\nAuto-rerun stopped.")
-                follow_up = (
-                    _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
-                    or ""
-                ).strip().upper()
+                try:
+                    follow_up = (
+                        _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                        or ""
+                    ).strip().upper()
+                except KeyboardInterrupt:
+                    print("Returning to main menu.")
+                    return
                 if follow_up == "BACK":
                     return
                 break
