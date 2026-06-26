@@ -841,7 +841,11 @@ def _alpaca_optimizer_menu(df):
         if continuous_mode and rerun_minutes <= 0:
             rerun_minutes = 5.0
             print("Option 10 continuous mode: auto-rerun forced to every 5 minutes.")
-        wait_for_open = ((_prompt("If market is closed, wait and run at market open? (y/n)", "y") or "y").strip().lower() == "y")
+        if source_choice == 10:
+            wait_for_open = True
+            print("Option 10 enforces market-open check: optimizer will wait for market open before running.")
+        else:
+            wait_for_open = ((_prompt("If market is closed, wait and run at market open? (y/n)", "y") or "y").strip().lower() == "y")
 
         cmd_base = [
             sys.executable,
