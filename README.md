@@ -276,10 +276,11 @@ Behavior in option 9:
   - Supertrend, Chandelier Exit, and Trend Filter must all be bullish
 - In source option `10`, end-of-day close is enforced automatically when execution is enabled
   - you still choose how many minutes before market close to force-close
-- Prompt for auto-rerun every N minutes (`0` disables rerun)
+- Prompt for auto-rerun every N minutes
+- In source option `10`, continuous mode is enforced and rerun defaults to every 5 minutes if `0` is entered
 - Prompt to wait for market open when closed
 - Stays in optimizer flow until you explicitly type `BACK`
-- If auto-rerun is enabled, runs repeatedly and can be stopped with `Ctrl+C`
+- Runs repeatedly and can be stopped with `Ctrl+C` (then choose `BACK` or reconfigure)
 
 Important:
 

@@ -711,6 +711,7 @@ def _alpaca_optimizer_menu(df):
 
     while True:
         tech_presets = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ"]
+        continuous_mode = False
         print("\nSymbol source")
         print("  1. Tech presets (NVDA/AAPL/MSFT/AMZN/GOOGL/META/TSLA/QQQ)")
         print("  2. Defense stock universe (curated)")
@@ -735,6 +736,7 @@ def _alpaca_optimizer_menu(df):
             raw = _prompt("Enter tickers (comma-separated)", "NVDA,AAPL,MSFT") or "NVDA,AAPL,MSFT"
             base_symbols = [s.strip().upper() for s in raw.replace(";", ",").split(",") if s.strip()]
         elif source_choice == 10:
+            continuous_mode = True
             portfolio_symbols = [
                 t
                 for t in df["Ticker"].astype(str).str.strip().unique().tolist()
@@ -836,6 +838,9 @@ def _alpaca_optimizer_menu(df):
         rerun_minutes = _prompt_float("Auto-rerun every N minutes (0 = no auto-rerun)", 0.0)
         if rerun_minutes < 0:
             rerun_minutes = 0.0
+        if continuous_mode and rerun_minutes <= 0:
+            rerun_minutes = 5.0
+            print("Option 10 continuous mode: auto-rerun forced to every 5 minutes.")
         wait_for_open = ((_prompt("If market is closed, wait and run at market open? (y/n)", "y") or "y").strip().lower() == "y")
 
         cmd_base = [
@@ -910,6 +915,21 @@ def _alpaca_optimizer_menu(df):
                 print(f"  Symbols failed: {', '.join(failed)}")
 
             if rerun_minutes <= 0:
+                if continuous_mode:
+                    rerun_minutes = 5.0
+                    print("Continuous mode active: rerunning in 5.00 minute(s). Press Ctrl+C to stop.")
+                    try:
+                        time.sleep(300)
+                    except KeyboardInterrupt:
+                        print("\nAuto-rerun stopped.")
+                        follow_up = (
+                            _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                            or ""
+                        ).strip().upper()
+                        if follow_up == "BACK":
+                            return
+                        break
+                    continue
                 follow_up = (
                     _prompt("Type BACK to return to main menu, press Enter to run optimizer again, or NEW to change settings", "")
                     or ""
