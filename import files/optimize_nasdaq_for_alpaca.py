@@ -26,6 +26,14 @@ from utils import (
     compute_volatility_from_price_history,
 )
 
+try:
+    from gcp_utils import upload_dataframe_as_json, upload_to_gcs
+except ImportError:
+    def upload_dataframe_as_json(*args, **kwargs):
+        return False
+    def upload_to_gcs(*args, **kwargs):
+        return False
+
 
 ANNUAL_BARS_1H_US = 252 * 6.5
 
@@ -686,6 +694,45 @@ def _monitor_position_loss_and_eod(
         time.sleep(max(1.0, sleep_seconds))
 
 
+
+def upload_results_to_gcs(symbol: str, best_row, full_results_df, best_params: dict, latest_signal: str, companion: dict) -> None:
+    """Upload optimization results to Google Cloud Storage."""
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        results_dict = {
+            "symbol": symbol,
+            "timestamp": timestamp,
+            "best_parameters": best_params,
+            "best_metrics": {
+                "train_return": float(best_row["train_return"]),
+                "train_sharpe": float(best_row["train_sharpe"]),
+                "train_max_drawdown": float(best_row["train_max_dd"]),
+                "train_trades": int(best_row["train_trades"]),
+                "test_return": float(best_row["test_return"]),
+                "test_sharpe": float(best_row["test_sharpe"]),
+                "test_max_drawdown": float(best_row["test_max_dd"]),
+                "test_trades": int(best_row["test_trades"]),
+                "score": float(best_row["score"]),
+            },
+            "latest_signal": latest_signal,
+            "companion_signals": companion,
+        }
+
+        remote_path = f"optimizer/{symbol}/{timestamp.replace(':', '-')}/results.json"
+        upload_dataframe_as_json(full_results_df, "generative-ai-finance-backtest-logs", remote_path)
+
+        remote_summary = f"optimizer/{symbol}/{timestamp.replace(':', '-')}/summary.json"
+        upload_to_gcs(
+            local_path=None,
+            bucket_name="generative-ai-finance-backtest-logs",
+            remote_path=remote_summary,
+            data_dict=results_dict,
+        )
+    except Exception as e:
+        print(f"[GCS] Warning: Could not upload optimization results: {e}")
+
+
 def run_optimization(
     symbol: str,
     interval: str,
@@ -810,6 +857,8 @@ def run_optimization(
         f"MA={companion['MA']} | RSI={companion['RSI']} (value={rsi_txt}) | "
         f"MACD={companion['MACD']}"
     )
+
+    upload_results_to_gcs(symbol, best, res, best_params, latest_signal, companion)
 
     return {
         "symbol": symbol,

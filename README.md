@@ -9,6 +9,8 @@ The project supports:
 - Investment Possibilities assessments with portfolio-wide notes
 - Alpaca paper/live bot mode from the CLI menu
 - Automated security scans and dependency update checks via GitHub Actions
+- Google Cloud Storage integration for automatic backtest log upload and retrieval
+- Google Cloud VM deployment for 24/7 trading bot execution
 
 ## Features
 
@@ -53,7 +55,13 @@ The project supports:
 - `utils.py`: Data retrieval and analysis helpers
 - `cli_app.py`: Interactive CLI version for terminal use
 - `alpaca_trading_bot.py`: Alpaca execution loop used by CLI option 8
+- `gcp_utils.py`: Google Cloud Storage upload utilities
 - `requirements.txt`: Python dependencies
+- `GCP_SETUP.md`: Step-by-step GCP bucket and credentials setup
+- `GCP_CLI_COMMANDS.md`: Copy-paste CLI commands for retrieving cloud logs
+- `COPY_PASTE_COMMANDS.md`: All setup commands in one place
+- `gcp-setup.sh`: Automated GCP setup script (Linux/Mac)
+- `gcp-setup.bat`: Automated GCP setup script (Windows)
 - `run.ps1`: Windows helper script to launch the app with the local venv Python
 - `run_cli.ps1`: Windows helper script for CLI in the `.venv311` environment
 - `run_cli.sh`: Git Bash helper script for CLI in the `.venv311` environment
@@ -342,12 +350,91 @@ ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets
 ALPACA_LIVE_API_KEY=...
 ALPACA_LIVE_API_SECRET=...
 ALPACA_LIVE_BASE_URL=https://api.alpaca.markets
+
+GOOGLE_APPLICATION_CREDENTIALS=./gcp-key.json
 ```
 
 - Prices are converted to EUR using FX rates from Yahoo pairs.
 - If a ticker cannot be priced, the app continues and marks that row as unavailable.
 - Some analysis metrics may be unavailable for certain instruments (for example ETFs/crypto for P/E).
-- Keep `.env` out of Git commits.
+- Keep `.env` and `gcp-key.json` out of Git commits (both are in `.gitignore`).
+
+## Google Cloud Storage Integration
+
+Backtest results and trade logs are automatically uploaded to Google Cloud Storage after each run.
+
+### Setup (one-time)
+
+Follow `GCP_SETUP.md` or run the automated script:
+
+```bash
+# Linux/Mac
+bash gcp-setup.sh
+
+# Windows
+gcp-setup.bat
+```
+
+Required environment variable:
+```env
+GOOGLE_APPLICATION_CREDENTIALS=./gcp-key.json
+```
+
+### Retrieving Logs
+
+```bash
+# List all backtest runs
+gsutil ls gs://generative-ai-finance-backtest-logs/optimizer/
+
+# Download latest results for a symbol
+gsutil cp gs://generative-ai-finance-backtest-logs/optimizer/NVDA/*/summary.json ./
+
+# Download all trade logs
+gsutil cp gs://generative-ai-finance-backtest-logs/trade-logs/*.log ./
+```
+
+See `GCP_CLI_COMMANDS.md` for the full list of retrieval commands.
+
+### Fallback
+
+If GCP credentials are not configured, results are stored locally in `/logs/` and a warning is printed. No functionality is affected.
+
+## Running on Google Cloud VM (24/7 Trading)
+
+To run the trading bot continuously on a GCP VM so it trades automatically at market open:
+
+### SSH into your VM
+
+```bash
+gcloud compute ssh instance-20260521-042726 --zone=us-central1-b
+```
+
+### First-time setup on VM
+
+```bash
+git clone https://github.com/ryan-wlr/Generative_AI_Finance.git
+cd Generative_AI_Finance
+pip install -r requirements.txt
+nano .env  # paste your Alpaca API keys
+```
+
+### Run bot in persistent session
+
+```bash
+screen -S trading-bot
+python cli_app.py
+# Choose option 9 -> source 10 (ALL sources, continuous mode)
+```
+
+Detach from screen (bot keeps running after you close terminal):
+```
+Ctrl+A then D
+```
+
+Reattach to check on it:
+```bash
+screen -r trading-bot
+```
 
 ## Security
 

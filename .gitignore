@@ -6,6 +6,7 @@ __pycache__/
 .Python
 venv/
 .venv/
+.venv-wsl/
 env/
 .env
 
@@ -17,3 +18,6 @@ env/
 .vscode/
 .DS_Store
 *.log
+
+# GCP credentials
+gcp-key.json

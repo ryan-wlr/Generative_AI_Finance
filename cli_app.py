@@ -7,7 +7,7 @@ import sys
 import subprocess
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 SUPPORTED_MIN = (3, 10)
 SUPPORTED_MAX_EXCLUSIVE = (3, 14)
@@ -124,6 +124,12 @@ def _alpaca_creds_present(mode: str) -> tuple[bool, list[str]]:
         required = ["ALPACA_PAPER_API_KEY", "ALPACA_PAPER_API_SECRET", "ALPACA_PAPER_BASE_URL"]
     missing = [k for k in required if not os.getenv(k)]
     return len(missing) == 0, missing
+
+
+def _retry_at_text(delay_minutes: float) -> str:
+    delay_minutes = max(0.0, float(delay_minutes))
+    eta = datetime.now() + timedelta(minutes=delay_minutes)
+    return eta.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _ensure_columns(df):
@@ -911,10 +917,14 @@ def _alpaca_optimizer_menu(df):
                     "\nSkipping optimizer batch before run because Alpaca credentials are missing for "
                     f"mode='{mode}': {', '.join(missing_keys)}"
                 )
+                print("Cannot fetch market-open wake time until Alpaca credentials are configured.")
                 if rerun_minutes <= 0:
                     if continuous_mode:
                         rerun_minutes = 5.0
-                        print("Continuous mode active: sleeping 5.00 minute(s) before retry.")
+                        print(
+                            "Continuous mode active: sleeping 5.00 minute(s) before retry. "
+                            f"Next credential check at {_retry_at_text(5.0)} local time."
+                        )
                         try:
                             time.sleep(300)
                         except KeyboardInterrupt:
@@ -944,7 +954,8 @@ def _alpaca_optimizer_menu(df):
                     continue
 
                 print(
-                    f"Auto-rerun enabled: next credential check in {rerun_minutes:.2f} minute(s). "
+                    f"Auto-rerun enabled: next credential check in {rerun_minutes:.2f} minute(s) "
+                    f"(at {_retry_at_text(rerun_minutes)} local time). "
                     "Press Ctrl+C to stop auto-rerun."
                 )
                 try:
@@ -991,7 +1002,10 @@ def _alpaca_optimizer_menu(df):
             if rerun_minutes <= 0:
                 if continuous_mode:
                     rerun_minutes = 5.0
-                    print("Continuous mode active: rerunning in 5.00 minute(s). Press Ctrl+C to stop.")
+                    print(
+                        "Continuous mode active: rerunning in 5.00 minute(s) "
+                        f"(at {_retry_at_text(5.0)} local time). Press Ctrl+C to stop."
+                    )
                     try:
                         time.sleep(300)
                     except KeyboardInterrupt:
@@ -1019,7 +1033,8 @@ def _alpaca_optimizer_menu(df):
                 continue
 
             print(
-                f"Auto-rerun enabled: next run in {rerun_minutes:.2f} minute(s). "
+                f"Auto-rerun enabled: next run in {rerun_minutes:.2f} minute(s) "
+                f"(at {_retry_at_text(rerun_minutes)} local time). "
                 "Press Ctrl+C to stop auto-rerun."
             )
             try:

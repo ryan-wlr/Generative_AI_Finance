@@ -7,3 +7,4 @@ streamlit
 langchain_openai
 python-dotenv
 alpaca-py
+google-cloud-storage

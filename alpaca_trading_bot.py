@@ -32,6 +32,12 @@ from dotenv import load_dotenv
 
 from utils import _yahoo_session, get_history, format_new_instrument_assessment
 
+try:
+    from gcp_utils import upload_file_to_gcs
+except ImportError:
+    def upload_file_to_gcs(*args, **kwargs):
+        return False
+
 
 def init_log_file(mode: str) -> Path:
     """Create and return a log file path for this bot session."""
@@ -459,12 +465,17 @@ def run_bot(portfolio_tickers: list[str] | None = None) -> None:
             cmd = input("\nBot interrupt detected. Type EXIT to stop bot, or press Enter to continue: ").strip().upper()
             if cmd == "EXIT":
                 bot_log("Stopping bot by user request.", log_file)
+                bot_log("Uploading session log to cloud storage...", log_file)
+                upload_file_to_gcs(
+                    str(log_file),
+                    "generative-ai-finance-backtest-logs",
+                    f"trade-logs/{log_file.name}"
+                )
                 break
             bot_log("Continuing bot session.", log_file)
             continue
         except Exception as exc:
             bot_log(f"Bot error: {exc}", log_file)
-            # Sleep briefly to avoid tight retry loop on API/network issues.
             time.sleep(30)
 
 
