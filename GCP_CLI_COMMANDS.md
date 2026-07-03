@@ -1,5 +1,47 @@
 # CLI Commands to Retrieve Backtest Logs from Google Cloud Storage
 
+## VM to Local Computer (Direct Copy)
+
+Use these when your logs are on the VM and you want them on your own laptop/desktop.
+
+### Option A: Linux/macOS local terminal
+
+```bash
+# From your LOCAL machine (not inside SSH)
+bash pull_vm_logs_to_local.sh us-central1-a
+
+# With explicit values
+bash pull_vm_logs_to_local.sh us-central1-a instance-20260521-042726 weilerryan31 /home/weilerryan31/Generative_AI_Finance "$HOME/Downloads/finance-logs"
+
+# If IAP is required
+USE_IAP=1 bash pull_vm_logs_to_local.sh us-central1-a
+```
+
+### Option B: Windows PowerShell local terminal
+
+```powershell
+# From your LOCAL machine (not inside SSH)
+.\pull_vm_logs_to_local.ps1 -Zone us-central1-a
+
+# With explicit values
+.\pull_vm_logs_to_local.ps1 -Zone us-central1-a -Instance instance-20260521-042726 -VmUser weilerryan31 -RemoteDir /home/weilerryan31/Generative_AI_Finance -DestDir "$HOME\Downloads\finance-logs"
+
+# If IAP is required
+.\pull_vm_logs_to_local.ps1 -Zone us-central1-a -UseIap
+```
+
+### Find your zone (run locally)
+
+```bash
+gcloud compute instances list --filter="name=instance-20260521-042726"
+```
+
+### Verify downloaded files (local)
+
+```bash
+ls -lh ~/Downloads/finance-logs/*.log
+```
+
 ## Quick Start
 
 ### 1. List All Backtest Optimization Results

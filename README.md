@@ -62,6 +62,8 @@ The project supports:
 - `COPY_PASTE_COMMANDS.md`: All setup commands in one place
 - `gcp-setup.sh`: Automated GCP setup script (Linux/Mac)
 - `gcp-setup.bat`: Automated GCP setup script (Windows)
+- `pull_vm_logs_to_local.sh`: Copy VM `.log` files to your local machine (Linux/Mac terminal)
+- `pull_vm_logs_to_local.ps1`: Copy VM `.log` files to your local machine (Windows PowerShell)
 - `run.ps1`: Windows helper script to launch the app with the local venv Python
 - `run_cli.ps1`: Windows helper script for CLI in the `.venv311` environment
 - `run_cli.sh`: Git Bash helper script for CLI in the `.venv311` environment
@@ -383,17 +385,29 @@ GOOGLE_APPLICATION_CREDENTIALS=./gcp-key.json
 ### Retrieving Logs
 
 ```bash
-# List all backtest runs
-gsutil ls gs://generative-ai-finance-backtest-logs/optimizer/
+# List all optimizer artifacts
+gcloud storage ls --recursive gs://generative-ai-finance-backtest-logs/optimizer/**
 
-# Download latest results for a symbol
-gsutil cp gs://generative-ai-finance-backtest-logs/optimizer/NVDA/*/summary.json ./
+# List all summary files
+gcloud storage ls --recursive gs://generative-ai-finance-backtest-logs/optimizer/**/summary.json
 
 # Download all trade logs
-gsutil cp gs://generative-ai-finance-backtest-logs/trade-logs/*.log ./
+gcloud storage cp gs://generative-ai-finance-backtest-logs/trade-logs/*.log ./
 ```
 
-See `GCP_CLI_COMMANDS.md` for the full list of retrieval commands.
+Copy logs from VM directly to your local machine:
+
+```bash
+# Run from LOCAL machine terminal (not inside SSH)
+bash pull_vm_logs_to_local.sh us-central1-b
+```
+
+```powershell
+# Run from LOCAL PowerShell
+.\pull_vm_logs_to_local.ps1 -Zone us-central1-b
+```
+
+See `GCP_CLI_COMMANDS.md` for the full list of retrieval and VM transfer commands.
 
 ### Fallback
 

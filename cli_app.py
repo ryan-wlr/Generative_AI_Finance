@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 SUPPORTED_MIN = (3, 10)
 SUPPORTED_MAX_EXCLUSIVE = (3, 14)
+OPTIMIZER_EXIT_SYMBOL_UNAVAILABLE = 3
 
 
 def _ensure_supported_python() -> None:
@@ -977,6 +978,7 @@ def _alpaca_optimizer_menu(df):
 
             print("\nRunning optimizer batch...")
             passed = []
+            skipped = []
             failed = []
             for idx, symbol in enumerate(symbols, start=1):
                 cmd = list(cmd_base) + ["--symbol", symbol]
@@ -985,8 +987,12 @@ def _alpaca_optimizer_menu(df):
                     subprocess.run(cmd, check=True)
                     passed.append(symbol)
                 except subprocess.CalledProcessError as exc:
-                    print(f"Optimizer failed for {symbol} (exit code {exc.returncode}).")
-                    failed.append(symbol)
+                    if int(exc.returncode) == OPTIMIZER_EXIT_SYMBOL_UNAVAILABLE:
+                        print(f"Optimizer skipped for {symbol}: symbol not available in Alpaca assets.")
+                        skipped.append(symbol)
+                    else:
+                        print(f"Optimizer failed for {symbol} (exit code {exc.returncode}).")
+                        failed.append(symbol)
                 except Exception as exc:
                     print(f"Could not run optimizer for {symbol}: {exc}")
                     failed.append(symbol)
@@ -995,6 +1001,9 @@ def _alpaca_optimizer_menu(df):
             print(f"  Success: {len(passed)}")
             if passed:
                 print(f"  Symbols succeeded: {', '.join(passed)}")
+            print(f"  Skipped: {len(skipped)}")
+            if skipped:
+                print(f"  Symbols skipped: {', '.join(skipped)}")
             print(f"  Failed: {len(failed)}")
             if failed:
                 print(f"  Symbols failed: {', '.join(failed)}")

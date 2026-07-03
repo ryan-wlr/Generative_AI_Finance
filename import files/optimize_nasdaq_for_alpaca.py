@@ -36,6 +36,16 @@ except ImportError:
 
 
 ANNUAL_BARS_1H_US = 252 * 6.5
+EXIT_CODE_SYMBOL_UNAVAILABLE = 3
+
+
+class SymbolUnavailableError(RuntimeError):
+    """Raised when a symbol is unavailable or unsupported by Alpaca assets API."""
+
+
+def _looks_like_alpaca_asset_not_found(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return ("asset not found" in msg) or ("40410000" in msg)
 
 
 def _compute_atr_from_ohlc(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.Series:
@@ -480,6 +490,10 @@ def _verify_alpaca_symbol(symbol: str, mode: str):
             print(f"Warning: {symbol} is tradable, but exchange is {exchange} (not NASDAQ).")
         return client
     except Exception as exc:
+        if _looks_like_alpaca_asset_not_found(exc):
+            raise SymbolUnavailableError(
+                f"{symbol} is not available in Alpaca assets (asset not found)."
+            ) from exc
         raise RuntimeError(f"Alpaca check failed for {symbol}: {exc}") from exc
 
 
@@ -1055,16 +1069,23 @@ def main() -> None:
     load_dotenv(here.parent / ".env", override=False)
 
     args = parse_args()
-    result = run_optimization(
-        symbol=args.symbol,
-        interval=args.interval,
-        period=args.period,
-        mode=args.mode,
-        min_trades=max(0, int(args.min_trades)),
-        cost_bps=max(0.0, float(args.cost_bps)),
-        require_market_open=not bool(args.allow_when_closed),
-        wait_for_open=bool(args.wait_for_open),
-    )
+    try:
+        result = run_optimization(
+            symbol=args.symbol,
+            interval=args.interval,
+            period=args.period,
+            mode=args.mode,
+            min_trades=max(0, int(args.min_trades)),
+            cost_bps=max(0.0, float(args.cost_bps)),
+            require_market_open=not bool(args.allow_when_closed),
+            wait_for_open=bool(args.wait_for_open),
+        )
+    except SymbolUnavailableError as exc:
+        print(f"Skipping symbol: {exc}")
+        raise SystemExit(EXIT_CODE_SYMBOL_UNAVAILABLE)
+    except Exception as exc:
+        print(f"Optimizer failed for {str(args.symbol).strip().upper()}: {exc}")
+        raise SystemExit(1)
 
     if result is None:
         return
