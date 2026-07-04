@@ -927,6 +927,7 @@ def _alpaca_optimizer_menu(df):
 
         cmd_base = [
             sys.executable,
+            "-u",
             str(script_path),
             "--mode",
             mode,
@@ -1090,6 +1091,7 @@ def _alpaca_optimizer_menu(df):
                         stderr=subprocess.STDOUT,
                         text=True,
                         bufsize=1,
+                        env={**os.environ, "PYTHONUNBUFFERED": "1"},
                     )
 
                     if proc.stdout is not None:
