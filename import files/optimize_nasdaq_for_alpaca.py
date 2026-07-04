@@ -532,7 +532,16 @@ def _wait_until_market_open(client) -> None:
             wait_seconds = max(1.0, (next_open - now).total_seconds()) if now is not None else 60.0
             print(f"Market status: CLOSED (next open: {next_open})")
             print(f"Waiting until market open (~{wait_seconds / 60.0:.1f} minutes)...")
-            time.sleep(wait_seconds)
+
+            # Sleep in chunks so the process stays visibly active instead of
+            # appearing frozen during long overnight/weekend waits.
+            remaining = wait_seconds
+            while remaining > 0:
+                nap = min(60.0, remaining)
+                time.sleep(nap)
+                remaining -= nap
+                if remaining > 0:
+                    print(f"Still waiting for market open (~{remaining / 60.0:.1f} minutes remaining)...")
         else:
             print("Market status: CLOSED (next open unavailable). Retrying in 60 seconds...")
             time.sleep(60)

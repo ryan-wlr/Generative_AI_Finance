@@ -1083,30 +1083,38 @@ def _alpaca_optimizer_menu(df):
                         f"max-pe={gate_cfg['max_pe_ratio']:.1f}, max-vol={gate_cfg['max_volatility_pct']:.1f}%"
                     )
                 try:
-                    completed = subprocess.run(cmd, check=True, text=True, capture_output=True)
-                    if completed.stdout:
-                        print(completed.stdout.rstrip())
-                    if completed.stderr:
-                        print(completed.stderr.rstrip())
-                    if do_execute and enforce_daily_target:
-                        summary = _parse_execution_summary((completed.stdout or "") + "\n" + (completed.stderr or ""))
-                        if summary["status"] == "ok" and int(summary["orders"]) > 0:
-                            trades_filled_today += int(summary["orders"])
-                            print(
-                                f"Filled orders added: +{int(summary['orders'])} | "
-                                f"Daily progress: {trades_filled_today}/{daily_trade_target}"
-                            )
-                    passed.append(symbol)
-                except subprocess.CalledProcessError as exc:
-                    if exc.stdout:
-                        print(exc.stdout.rstrip())
-                    if exc.stderr:
-                        print(exc.stderr.rstrip())
-                    if int(exc.returncode) == OPTIMIZER_EXIT_SYMBOL_UNAVAILABLE:
+                    captured_lines: list[str] = []
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+
+                    if proc.stdout is not None:
+                        for line in proc.stdout:
+                            print(line.rstrip())
+                            captured_lines.append(line)
+
+                    return_code = int(proc.wait())
+                    merged_output = "".join(captured_lines)
+
+                    if return_code == 0:
+                        if do_execute and enforce_daily_target:
+                            summary = _parse_execution_summary(merged_output)
+                            if summary["status"] == "ok" and int(summary["orders"]) > 0:
+                                trades_filled_today += int(summary["orders"])
+                                print(
+                                    f"Filled orders added: +{int(summary['orders'])} | "
+                                    f"Daily progress: {trades_filled_today}/{daily_trade_target}"
+                                )
+                        passed.append(symbol)
+                    elif return_code == OPTIMIZER_EXIT_SYMBOL_UNAVAILABLE:
                         print(f"Optimizer skipped for {symbol}: symbol not available in Alpaca assets.")
                         skipped.append(symbol)
                     else:
-                        print(f"Optimizer failed for {symbol} (exit code {exc.returncode}).")
+                        print(f"Optimizer failed for {symbol} (exit code {return_code}).")
                         failed.append(symbol)
                 except Exception as exc:
                     print(f"Could not run optimizer for {symbol}: {exc}")
