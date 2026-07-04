@@ -3,6 +3,7 @@ Simple interactive CLI for stock portfolio analysis.
 Run: python cli_app.py
 """
 import os
+import re
 import sys
 import subprocess
 import time
@@ -727,6 +728,61 @@ def _alpaca_optimizer_menu(df):
         )
         return rank_df.sort_values("score", ascending=False).reset_index(drop=True)
 
+    def _parse_execution_summary(output_text: str) -> dict:
+        details = {"orders": 0, "status": "", "action": "", "signal": "", "note": ""}
+        if not output_text:
+            return details
+
+        for raw in output_text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("Orders:"):
+                m = re.search(r"(\\d+)", line)
+                if m:
+                    details["orders"] = int(m.group(1))
+            elif line.startswith("Status:"):
+                details["status"] = line.split(":", 1)[1].strip().lower()
+            elif line.startswith("Action:"):
+                details["action"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Signal:"):
+                details["signal"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Note:"):
+                details["note"] = line.split(":", 1)[1].strip()
+        return details
+
+    def _adaptive_gate(base_cfg: dict, trades_today: int, daily_target: int, symbols_left: int) -> dict:
+        gate = dict(base_cfg)
+        gate["level"] = "base"
+        gate["strict_trend_alignment"] = bool(base_cfg.get("strict_trend_alignment", False))
+
+        target = max(0, int(daily_target))
+        if target <= 0 or int(trades_today) >= target:
+            return gate
+
+        remaining = max(0, target - int(trades_today))
+        symbols_left = max(1, int(symbols_left))
+        urgency = float(remaining) / float(symbols_left)
+
+        if urgency >= 1.0:
+            gate["level"] = "aggressive"
+            gate["min_aligned"] = 1
+            gate["min_companion_bull_votes"] = 1
+            gate["max_pe_ratio"] = max(float(gate["max_pe_ratio"]), 250.0)
+            gate["max_volatility_pct"] = max(float(gate["max_volatility_pct"]), 350.0)
+            gate["strict_trend_alignment"] = False
+            return gate
+
+        if urgency >= 0.5:
+            gate["level"] = "moderate"
+            gate["min_aligned"] = 1
+            gate["min_companion_bull_votes"] = 1
+            gate["max_pe_ratio"] = max(float(gate["max_pe_ratio"]), 120.0)
+            gate["max_volatility_pct"] = max(float(gate["max_volatility_pct"]), 220.0)
+            gate["strict_trend_alignment"] = False
+
+        return gate
+
     while True:
         tech_presets = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "QQQ"]
         continuous_mode = False
@@ -811,32 +867,36 @@ def _alpaca_optimizer_menu(df):
         do_execute = (_prompt("Execute optimized signal on Alpaca? (y/n)", "y") or "y").strip().lower() == "y"
         order_qty = 1
         allow_short = False
-        min_aligned = 2
+        min_aligned = 1
         strict_trend_alignment = False
         loss_close_threshold = 0.0
         risk_check_seconds = 15
         force_close_eod = False
         eod_close_minutes = 10
-        max_pe_ratio = 45.0
-        max_volatility_pct = 65.0
-        min_companion_bull_votes = 2
+        max_pe_ratio = 80.0
+        max_volatility_pct = 150.0
+        min_companion_bull_votes = 1
+        daily_trade_target = 3
+        enforce_daily_target = False
+        target_retry_minutes = 2.0
         if do_execute:
             order_qty = max(1, _prompt_int("Order quantity", 1))
             allow_short = ((_prompt("Allow short entries on bearish signal? (y/n)", "n") or "n").strip().lower() == "y")
-            min_aligned = max(1, _prompt_int("Minimum aligned signals to trade (optimizer+MA+RSI+MACD)", 2))
-            max_pe_ratio = _prompt_float("Max trailing P/E allowed before BUY", 45.0)
-            max_volatility_pct = _prompt_float("Max annualized volatility % allowed before BUY", 65.0)
-            min_companion_bull_votes = max(1, _prompt_int("Min bullish companion votes (MA/RSI/MACD) before BUY", 2))
+            min_aligned = max(1, _prompt_int("Minimum aligned signals to trade (optimizer+MA+RSI+MACD)", 1))
+            max_pe_ratio = _prompt_float("Max trailing P/E allowed before BUY", 80.0)
+            max_volatility_pct = _prompt_float("Max annualized volatility % allowed before BUY", 150.0)
+            min_companion_bull_votes = max(1, _prompt_int("Min bullish companion votes (MA/RSI/MACD) before BUY", 1))
+            daily_trade_target = max(1, _prompt_int("Daily filled-order target", 3))
+            enforce_daily_target = ((_prompt("Enforce daily fill target with auto-reruns? (y/n)", "y") or "y").strip().lower() == "y")
+            if enforce_daily_target:
+                target_retry_minutes = max(0.5, _prompt_float("Minutes between retries while target not met", 2.0))
 
             if source_choice == 10:
-                # Option 10 is the strict "run everything" mode.
-                strict_trend_alignment = True
-                min_aligned = max(4, int(min_aligned))
-                min_companion_bull_votes = max(3, int(min_companion_bull_votes))
+                # Option 10 scans all symbol sources but keeps execution thresholds relaxed by default.
+                strict_trend_alignment = False
                 print(
-                    "Strict alignment enabled for option 10: "
-                    "BUY requires optimizer+MA+RSI+MACD all bullish plus "
-                    "Supertrend+Chandelier+Trend Filter bullish."
+                    "Option 10 uses relaxed execution defaults: "
+                    "BUY can trigger with lower vote thresholds and without strict trend alignment."
                 )
 
             loss_close_threshold = _prompt_float(
@@ -880,38 +940,26 @@ def _alpaca_optimizer_menu(df):
             str(max(0.0, float(cost_bps))),
         ]
 
-        if do_execute:
-            cmd_base.extend([
-                "--execute-trade",
-                "--order-qty",
-                str(order_qty),
-                "--min-aligned-signals",
-                str(min_aligned),
-                "--loss-close-threshold",
-                str(float(loss_close_threshold)),
-                "--risk-check-seconds",
-                str(max(5, int(risk_check_seconds))),
-                "--max-pe-ratio",
-                str(max(0.0, float(max_pe_ratio))),
-                "--max-volatility-pct",
-                str(max(0.0, float(max_volatility_pct))),
-                "--min-companion-bull-votes",
-                str(max(1, int(min_companion_bull_votes))),
-            ])
-            if allow_short:
-                cmd_base.append("--allow-short-entries")
-            if strict_trend_alignment:
-                cmd_base.append("--strict-trend-alignment")
-            if force_close_eod:
-                cmd_base.extend([
-                    "--force-close-eod",
-                    "--eod-close-minutes",
-                    str(max(0, int(eod_close_minutes))),
-                ])
         if wait_for_open:
             cmd_base.append("--wait-for-open")
 
+        trade_cfg_base = {
+            "min_aligned": max(1, int(min_aligned)),
+            "max_pe_ratio": max(0.0, float(max_pe_ratio)),
+            "max_volatility_pct": max(0.0, float(max_volatility_pct)),
+            "min_companion_bull_votes": max(1, int(min_companion_bull_votes)),
+            "strict_trend_alignment": bool(strict_trend_alignment),
+        }
+        trade_day = datetime.now().date()
+        trades_filled_today = 0
+
         while True:
+            now_day = datetime.now().date()
+            if now_day != trade_day:
+                trade_day = now_day
+                trades_filled_today = 0
+                print(f"\nNew trading day detected ({trade_day.isoformat()}). Daily fill counter reset.")
+
             creds_ok, missing_keys = _alpaca_creds_present(mode)
             if not creds_ok:
                 print(
@@ -977,16 +1025,83 @@ def _alpaca_optimizer_menu(df):
                 continue
 
             print("\nRunning optimizer batch...")
+            if do_execute and enforce_daily_target:
+                remaining_target = max(0, int(daily_trade_target) - int(trades_filled_today))
+                print(
+                    f"Daily fill target status: {trades_filled_today}/{daily_trade_target} filled order(s) "
+                    f"for {trade_day.isoformat()} (remaining: {remaining_target})."
+                )
             passed = []
             skipped = []
             failed = []
             for idx, symbol in enumerate(symbols, start=1):
-                cmd = list(cmd_base) + ["--symbol", symbol]
+                cmd = list(cmd_base)
+                gate_cfg = dict(trade_cfg_base)
+                if do_execute:
+                    symbols_left = len(symbols) - idx + 1
+                    if enforce_daily_target:
+                        gate_cfg = _adaptive_gate(
+                            trade_cfg_base,
+                            trades_today=trades_filled_today,
+                            daily_target=daily_trade_target,
+                            symbols_left=symbols_left,
+                        )
+                    cmd.extend([
+                        "--execute-trade",
+                        "--order-qty",
+                        str(order_qty),
+                        "--min-aligned-signals",
+                        str(max(1, int(gate_cfg["min_aligned"]))),
+                        "--loss-close-threshold",
+                        str(float(loss_close_threshold)),
+                        "--risk-check-seconds",
+                        str(max(5, int(risk_check_seconds))),
+                        "--max-pe-ratio",
+                        str(max(0.0, float(gate_cfg["max_pe_ratio"]))),
+                        "--max-volatility-pct",
+                        str(max(0.0, float(gate_cfg["max_volatility_pct"]))),
+                        "--min-companion-bull-votes",
+                        str(max(1, int(gate_cfg["min_companion_bull_votes"]))),
+                    ])
+                    if allow_short:
+                        cmd.append("--allow-short-entries")
+                    if bool(gate_cfg.get("strict_trend_alignment", False)):
+                        cmd.append("--strict-trend-alignment")
+                    if force_close_eod:
+                        cmd.extend([
+                            "--force-close-eod",
+                            "--eod-close-minutes",
+                            str(max(0, int(eod_close_minutes))),
+                        ])
+                cmd.extend(["--symbol", symbol])
                 print(f"\n[{idx}/{len(symbols)}] Optimizing {symbol} ...")
+                if do_execute and enforce_daily_target:
+                    print(
+                        "Adaptive gate "
+                        f"[{gate_cfg.get('level', 'base')}]: min-aligned={gate_cfg['min_aligned']}, "
+                        f"min-companion={gate_cfg['min_companion_bull_votes']}, "
+                        f"max-pe={gate_cfg['max_pe_ratio']:.1f}, max-vol={gate_cfg['max_volatility_pct']:.1f}%"
+                    )
                 try:
-                    subprocess.run(cmd, check=True)
+                    completed = subprocess.run(cmd, check=True, text=True, capture_output=True)
+                    if completed.stdout:
+                        print(completed.stdout.rstrip())
+                    if completed.stderr:
+                        print(completed.stderr.rstrip())
+                    if do_execute and enforce_daily_target:
+                        summary = _parse_execution_summary((completed.stdout or "") + "\n" + (completed.stderr or ""))
+                        if summary["status"] == "ok" and int(summary["orders"]) > 0:
+                            trades_filled_today += int(summary["orders"])
+                            print(
+                                f"Filled orders added: +{int(summary['orders'])} | "
+                                f"Daily progress: {trades_filled_today}/{daily_trade_target}"
+                            )
                     passed.append(symbol)
                 except subprocess.CalledProcessError as exc:
+                    if exc.stdout:
+                        print(exc.stdout.rstrip())
+                    if exc.stderr:
+                        print(exc.stderr.rstrip())
                     if int(exc.returncode) == OPTIMIZER_EXIT_SYMBOL_UNAVAILABLE:
                         print(f"Optimizer skipped for {symbol}: symbol not available in Alpaca assets.")
                         skipped.append(symbol)
@@ -1007,8 +1122,38 @@ def _alpaca_optimizer_menu(df):
             print(f"  Failed: {len(failed)}")
             if failed:
                 print(f"  Symbols failed: {', '.join(failed)}")
+            if do_execute and enforce_daily_target:
+                remaining_target = max(0, int(daily_trade_target) - int(trades_filled_today))
+                print(
+                    f"  Daily fills: {trades_filled_today}/{daily_trade_target} "
+                    f"for {trade_day.isoformat()} (remaining: {remaining_target})"
+                )
 
             if rerun_minutes <= 0:
+                if do_execute and enforce_daily_target and trades_filled_today < daily_trade_target:
+                    print(
+                        "Daily fill target not met yet. "
+                        f"Retrying in {target_retry_minutes:.2f} minute(s) "
+                        f"(at {_retry_at_text(target_retry_minutes)} local time). "
+                        "Press Ctrl+C to stop."
+                    )
+                    try:
+                        time.sleep(max(1.0, target_retry_minutes * 60.0))
+                    except KeyboardInterrupt:
+                        print("\nAuto-rerun stopped.")
+                        try:
+                            follow_up = (
+                                _prompt("Type BACK to return to main menu, or press Enter to change optimizer settings", "")
+                                or ""
+                            ).strip().upper()
+                        except KeyboardInterrupt:
+                            print("Returning to main menu.")
+                            return
+                        if follow_up == "BACK":
+                            return
+                        break
+                    continue
+
                 if continuous_mode:
                     rerun_minutes = 5.0
                     print(

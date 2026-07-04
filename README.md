@@ -227,7 +227,7 @@ Try another Nasdaq symbol:
 Run with execution enabled and signal-vote threshold:
 
 ```powershell
-.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --order-qty 1 --min-aligned-signals 2
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --order-qty 1 --min-aligned-signals 1
 ```
 
 Allow short entries on bearish signals:
@@ -251,7 +251,7 @@ Run even when market is closed:
 Run with explicit bullish quality-gate thresholds:
 
 ```powershell
-.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --max-pe-ratio 40 --max-volatility-pct 55 --min-companion-bull-votes 2
+.\.venv311\Scripts\python.exe "import files\optimize_nasdaq_for_alpaca.py" --symbol NVDA --mode paper --execute-trade --max-pe-ratio 80 --max-volatility-pct 150 --min-companion-bull-votes 1
 ```
 
 ### CLI menu option
@@ -281,11 +281,14 @@ Behavior in option 9:
 - Optional short-entry enable prompt
 - Prompt for minimum aligned signals to trade
 - Prompt for bullish pre-buy quality thresholds (max P/E, max volatility, minimum companion bullish votes)
-- In source option `10`, strict alignment is enforced automatically for BUY decisions:
-  - optimizer + MA + RSI + MACD must all align bullish
-  - Supertrend, Chandelier Exit, and Trend Filter must all be bullish
+- Option `10` uses relaxed execution defaults (no forced strict trend alignment)
 - In source option `10`, end-of-day close is enforced automatically when execution is enabled
   - you still choose how many minutes before market close to force-close
+- Optional daily filled-order target (default `3`) with automatic reruns until the target is reached
+- Adaptive gate relaxation when behind daily target:
+  - lowers/keeps minimum vote thresholds at `1`
+  - widens pre-buy quality limits (P/E and volatility)
+  - disables strict trend-alignment requirements for catch-up attempts
 - Prompt for auto-rerun every N minutes
 - In source option `10`, continuous mode is enforced and rerun defaults to every 5 minutes if `0` is entered
 - Prompt to wait for market open when closed

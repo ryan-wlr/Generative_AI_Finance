@@ -394,8 +394,10 @@ def _pre_buy_quality_gate(
         "max_pe_ratio": float(max_pe_ratio),
         "max_volatility_pct": float(max_volatility_pct),
         "min_companion_bull_votes": int(min_companion_bull_votes),
-        "pe_pass": False,
-        "vol_pass": False,
+        # Missing PE/volatility inputs are treated as non-blocking so the gate
+        # only blocks when available data explicitly violates thresholds.
+        "pe_pass": True,
+        "vol_pass": True,
         "companion_pass": False,
         "strict_trend_alignment": bool(strict_trend_alignment),
         "trend_alignment": trend_alignment or {},
@@ -1019,8 +1021,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-aligned-signals",
         type=int,
-        default=2,
-        help="Minimum bullish/bearish votes across optimizer+companion signals before trading (default: 2)",
+        default=1,
+        help="Minimum bullish/bearish votes across optimizer+companion signals before trading (default: 1)",
     )
     parser.add_argument(
         "--allow-short-entries",
@@ -1040,20 +1042,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-pe-ratio",
         type=float,
-        default=45.0,
-        help="Maximum allowed trailing P/E to permit bullish buy execution (default: 45.0)",
+        default=80.0,
+        help="Maximum allowed trailing P/E to permit bullish buy execution (default: 80.0)",
     )
     parser.add_argument(
         "--max-volatility-pct",
         type=float,
-        default=65.0,
-        help="Maximum allowed annualized volatility %% to permit bullish buy execution (default: 65.0)",
+        default=150.0,
+        help="Maximum allowed annualized volatility %% to permit bullish buy execution (default: 150.0)",
     )
     parser.add_argument(
         "--min-companion-bull-votes",
         type=int,
-        default=2,
-        help="Minimum bullish votes across companion strategies (MA/RSI/MACD) for bullish buy execution (default: 2)",
+        default=1,
+        help="Minimum bullish votes across companion strategies (MA/RSI/MACD) for bullish buy execution (default: 1)",
     )
     parser.add_argument(
         "--strict-trend-alignment",
